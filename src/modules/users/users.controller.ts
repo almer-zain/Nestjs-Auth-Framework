@@ -24,6 +24,9 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
+import { RequirePermissions } from '../permissions/decorators/permissions.decorator';
+import type { JwtPayload } from 'src/common/types/jwt-types';
+import { CurrentUser } from 'src/common/decorator/current-user.decorator';
 
 @ApiTags('Users')
 @ApiBearerAuth()
@@ -34,6 +37,7 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Post()
+  @RequirePermissions('users.create')
   @ApiOperation({ summary: 'Register a new user' })
   create(@Body() createUserDto: CreateUserDto) {
     return this.usersService.create(createUserDto);
@@ -41,6 +45,7 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Get()
+  @RequirePermissions('users.read')
   @ApiOperation({ summary: 'Retrieve paginated user list' })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
@@ -64,11 +69,13 @@ export class UsersController {
   update(
     @Param('id', ParseIntPipe) id: number,
     @Body() updateUserDto: UpdateUserDto,
+    @CurrentUser() currentUser: JwtPayload,
   ) {
-    return this.usersService.update(id, updateUserDto);
+    return this.usersService.update(id, updateUserDto, currentUser);
   }
 
   @UseGuards(JwtAuthGuard)
+  @RequirePermissions('users.delete')
   @Delete(':id')
   @ApiOperation({ summary: 'Scrub and soft-delete user' })
   remove(@Param('id', ParseIntPipe) id: number) {

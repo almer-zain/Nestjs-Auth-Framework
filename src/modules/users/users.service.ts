@@ -5,11 +5,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
+import { Not, In, Repository } from 'typeorm';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { User } from './entities/user.entity';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
+import { AccessControlUtil } from 'src/utils/access-control.util';
+import { JwtPayload } from 'src/common/types/jwt-types';
+import { Role } from '../roles/entities/role.entity';
+import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class UsersService {
@@ -18,6 +22,8 @@ export class UsersService {
   constructor(
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
+    @InjectRepository(Role)
+    private readonly rolesRepository: Repository<Role>,
   ) {}
 
   /**
@@ -104,10 +110,39 @@ export class UsersService {
    *
    * @param id - Target user ID
    * @param dto - Partial update data
+   * @param currentUser - Current authenticated user
    * @returns The updated user entity
    */
-  async update(id: number, dto: UpdateUserDto): Promise<User> {
+  async update(
+    id: number,
+    dto: UpdateUserDto,
+    currentUser: JwtPayload,
+  ): Promise<User> {
+    AccessControlUtil.checkAdminOrOwner(
+      currentUser,
+      id,
+      'You are not authorized to update this user profile',
+    );
+
     const user = await this.findOne(id);
+    const isAdmin = AccessControlUtil.isAdmin(currentUser);
+    if (!isAdmin) {
+      delete dto.roleIds; // Prevents regular users from assigning roles to themselves!
+    }
+
+    if (dto.password) {
+      user.password = await bcrypt.hash(dto.password, 10);
+      delete dto.password; // Remove raw password from dto so Object.assign doesn't overwrite hashed password
+    }
+
+    if (isAdmin && dto.roleIds) {
+      if (dto.roleIds.length > 0) {
+        user.roles = await this.rolesRepository.findBy({ id: In(dto.roleIds) });
+      } else {
+        user.roles = []; // Clear roles if empty array provided
+      }
+      delete dto.roleIds;
+    }
 
     if (dto.email || dto.username) {
       const conflict = await this.usersRepository.findOne({
@@ -128,6 +163,7 @@ export class UsersService {
     }
 
     Object.assign(user, dto);
+
     const updated = await this.usersRepository.save(user);
     this.logger.log(`User updated: ID ${id}`);
     return updated;

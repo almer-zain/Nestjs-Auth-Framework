@@ -5,13 +5,15 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { Admin } from './entities/admin.entity';
 import { CreateAdminDto } from './dto/create-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import * as bcrypt from 'bcrypt';
 import { Role } from '../roles/entities/role.entity';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
+import type { JwtPayload } from 'src/common/types/jwt-types';
+import { AccessControlUtil } from 'src/utils/access-control.util';
 
 @Injectable()
 export class AdminsService {
@@ -20,6 +22,8 @@ export class AdminsService {
   constructor(
     @InjectRepository(Admin)
     private readonly adminsRepository: Repository<Admin>,
+    @InjectRepository(Role)
+    private readonly rolesRepository: Repository<Role>,
   ) {}
 
   /**
@@ -97,7 +101,15 @@ export class AdminsService {
    * @returns The admin entity with full permission tree
    * @throws NotFoundException if the admin does not exist
    */
-  async findOne(id: number): Promise<Admin> {
+  async findOne(id: number, currentUser?: JwtPayload): Promise<Admin> {
+    if (currentUser) {
+      AccessControlUtil.checkAdminOrOwner(
+        currentUser,
+        id,
+        'You are not authorized to view this admin profile',
+      );
+    }
+
     const admin = await this.adminsRepository.findOne({
       where: { id },
       relations: ['roles', 'roles.permissions'],
@@ -117,7 +129,23 @@ export class AdminsService {
    * @param dto - Partial update data
    * @returns The updated Admin entity
    */
-  async update(id: number, dto: UpdateAdminDto): Promise<Admin> {
+  async update(
+    id: number,
+    dto: UpdateAdminDto,
+    currentUser: JwtPayload,
+  ): Promise<Admin> {
+    AccessControlUtil.checkAdminOrOwner(
+      currentUser,
+      id,
+      'You are not authorized to update this admin profile',
+    );
+
+    const isSuperAdmin = AccessControlUtil.isAdmin(currentUser);
+
+    if (!isSuperAdmin) {
+      delete dto.roleIds;
+    }
+
     const { password, roleIds, ...rest } = dto;
     const admin = await this.findOne(id);
 
@@ -125,8 +153,30 @@ export class AdminsService {
       admin.password = await bcrypt.hash(password, 10);
     }
 
-    if (roleIds) {
-      admin.roles = roleIds.map((roleId) => ({ id: roleId }) as Role);
+    if (isSuperAdmin && roleIds) {
+      if (roleIds.length > 0) {
+        admin.roles = await this.rolesRepository.findBy({ id: In(roleIds) });
+      } else {
+        admin.roles = []; // Clear roles if empty array passed
+      }
+    }
+
+    if (rest.email || rest.username) {
+      const conflict = await this.adminsRepository.findOne({
+        where: [
+          { ...(rest.email && { email: rest.email }), id: Not(id) },
+          { ...(rest.username && { username: rest.username }), id: Not(id) },
+        ],
+      });
+
+      if (conflict) {
+        this.logger.warn(
+          `Update conflict: Admin ${id} attempted to use taken credentials`,
+        );
+        throw new ConflictException(
+          'Email or Username already taken by another admin',
+        );
+      }
     }
 
     Object.assign(admin, rest);

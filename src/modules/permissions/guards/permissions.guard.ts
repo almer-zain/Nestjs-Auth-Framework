@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { REQUIRE_PERMISSIONS } from 'src/common/decorator/permissions.decorator';
 import { RequestWithUser } from 'src/common/types/jwt-types';
+import { AccessControlUtil } from 'src/utils/access-control.util';
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {
@@ -18,25 +19,37 @@ export class PermissionsGuard implements CanActivate {
       [context.getHandler(), context.getClass()],
     );
 
-    if (!requiredPermissions) return true;
-    
+    // If no permission decorator is present, allow access
+    if (!requiredPermissions || requiredPermissions.length === 0) {
+      return true;
+    }
+
     const request = context.switchToHttp().getRequest<RequestWithUser>();
 
     const user = request.user;
 
-    // user.permissions is now safely typed based on your JwtPayload interface
-    if (!user || !user.permissions) {
-      throw new ForbiddenException('No permissions assigned to this account');
+    if (!user) {
+      throw new ForbiddenException('User context not found');
     }
 
-    const hasPermission = requiredPermissions.every((perm) =>
+    if (AccessControlUtil.isAdmin(user)) {
+      return true;
+    }
+
+    // Checks if user possesses ALL required permissions for the endpoint
+    const hasAllPermissions = requiredPermissions.every((perm) =>
       user.permissions.includes(perm),
     );
 
-    if (!hasPermission) {
-      throw new ForbiddenException('Insufficient permissions');
+    if (!user.permissions || user.permissions.length === 0) {
+      throw new ForbiddenException('No permissions assigned to this account');
     }
 
+    if (!hasAllPermissions) {
+      throw new ForbiddenException(
+        `Insufficient permissions. Required: [${requiredPermissions.join(', ')}]`,
+      );
+    }
     return true;
   }
 }
