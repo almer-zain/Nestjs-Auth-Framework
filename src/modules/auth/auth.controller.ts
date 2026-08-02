@@ -36,7 +36,7 @@ export class AuthController {
     return this.authService.login({ ...data, ip, userAgent: ua }, 'admin');
   }
 
-  @Post('login/user')
+  @Post('login')
   @ApiOperation({ summary: 'Authenticate standard user account' })
   userLogin(
     @Body() data: LoginDto,

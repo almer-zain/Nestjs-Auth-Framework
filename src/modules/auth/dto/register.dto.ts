@@ -10,21 +10,14 @@ import {
 import { IsValidUsername } from 'src/utils/auth-decorator.util';
 import {
   transformEmail,
-  transformSanitizeHtml,
-  transformTrim,
+  transformSanitizeHtmlClean,
 } from 'src/utils/sanitize.util';
 
 export class RegisterDto {
   @ApiProperty()
   @IsValidUsername()
-  @Transform(transformTrim)
+  @Transform(transformSanitizeHtmlClean)
   username: string;
-
-  @ApiProperty()
-  @IsNotEmpty()
-  @IsString()
-  @Transform(transformSanitizeHtml)
-  displayUsername: string;
 
   @ApiProperty()
   @IsEmail()

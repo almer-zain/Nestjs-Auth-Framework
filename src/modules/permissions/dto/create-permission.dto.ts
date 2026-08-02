@@ -7,10 +7,7 @@ import {
   Matches,
   MaxLength,
 } from 'class-validator';
-import {
-  transformSanitizeHtmlClean,
-  transformTrimAndLowercase,
-} from 'src/utils/sanitize.util';
+import { transformSanitizeHtmlClean } from 'src/utils/sanitize.util';
 
 export class CreatePermissionDto {
   @ApiProperty({ example: 'users.create' })
@@ -21,7 +18,7 @@ export class CreatePermissionDto {
     message:
       'Permission name can only contain lowercase letters, numbers, underscores, and dots.',
   })
-  @Transform(transformTrimAndLowercase)
+  @Transform(transformSanitizeHtmlClean)
   name: string;
 
   @ApiPropertyOptional({ example: 'Allows creating new users' })
