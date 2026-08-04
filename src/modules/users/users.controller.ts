@@ -81,4 +81,12 @@ export class UsersController {
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.usersService.remove(id);
   }
+
+  @UseGuards(JwtAuthGuard)
+  @RequirePermissions('users.restore')
+  @Patch(':id/restore')
+  @ApiOperation({ summary: 'Restore soft-delete user' })
+  restore(@Param('id', ParseIntPipe) id: number) {
+    return this.usersService.restore(id);
+  }
 }

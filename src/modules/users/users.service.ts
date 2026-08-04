@@ -179,20 +179,40 @@ export class UsersService {
   async remove(id: number): Promise<void> {
     const user = await this.findOne(id);
 
-    // Scrubbing PII for data retention compliance
-    user.email = `deleted-${id}@internal.system`;
-    user.username = `deleted_user_${id}`;
-    user.displayName = 'Deleted User';
-    user.password = 'SCRUBBED'; // Invalidate password
-    user.isTwoFactorEnabled = false;
-    user.twoFactorSecret = null;
-
-    // Save the scrubbed data first
-    await this.usersRepository.save(user);
-
     // Mark as soft-deleted (sets deletedAt timestamp)
     await this.usersRepository.softRemove(user);
 
-    this.logger.warn(`User record scrubbed and soft-deleted: ID ${id}`);
+    this.logger.warn(`User account marked for soft-deletion: ID ${id}`);
+  }
+
+  /**
+   * Restores a soft-deleted user during the 30-day grace period.
+   *
+   * @param id - Target user ID
+   * @returns The restored User entity
+   * @throws NotFoundException if user doesn't exist
+   * @throws ConflictException if user is not deleted
+   */
+  async restore(id: number): Promise<User> {
+    // Fetch user including soft-deleted records (withDeleted: true)
+    const user = await this.usersRepository.findOne({
+      where: { id },
+      withDeleted: true,
+    });
+
+    if (!user) {
+      this.logger.error(`Restore failed: User ID ${id} not found`);
+      throw new NotFoundException(`User with ID ${id} not found`);
+    }
+
+    if (!user.deletedAt) {
+      throw new ConflictException(`User ID ${id} is not deleted`);
+    }
+
+    // Recover the record (clears deletedAt timestamp)
+    await this.usersRepository.recover(user);
+
+    this.logger.log(`User account restored successfully: ID ${id}`);
+    return user;
   }
 }

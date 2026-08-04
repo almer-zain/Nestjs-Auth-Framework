@@ -39,6 +39,7 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
           .valid('development', 'production', 'test')
           .default('development'),
         PORT: Joi.number().default(3000),
+        URL: Joi.string().default('http://127.0.0.1'),
         FRONTEND_URL: Joi.string().uri().required(),
 
         // JWT
@@ -67,6 +68,7 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
         USE_REDIS: Joi.boolean().default(false),
         REDIS_HOST: Joi.string().default('localhost'),
         REDIS_PORT: Joi.number().default(6379),
+        REDIS_PASSWORD: Joi.string().default(''),
 
         // Mail
         MAIL_HOST: Joi.string().required(),
@@ -146,12 +148,14 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
               socket: {
                 host: config.get<string>('REDIS_HOST'),
                 port: config.get<number>('REDIS_PORT'),
+                reconnectStrategy: (retries) => Math.min(retries * 100, 3000),
               },
-              ttl: config.get<number>('CACHE_TTL') || 600,
+              password: config.get<string>('REDIS_PASSWORD') || undefined,
+              ttl: (config.get<number>('CACHE_TTL') || 600) * 1000,
             }),
           };
         }
-        return { ttl: config.get<number>('CACHE_TTL') || 600 };
+        return { ttl: (config.get<number>('CACHE_TTL') || 600) * 1000 };
       },
     }),
 
