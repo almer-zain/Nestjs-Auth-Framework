@@ -242,6 +242,10 @@ export class AuthService {
   async generateTokens(account: User | Admin) {
     const accountWithRoles = account as unknown as AccountWithRoles;
 
+    const roleNames: string[] = accountWithRoles.roles
+      ? accountWithRoles.roles.map((r) => r.name).filter(Boolean)
+      : [];
+
     const permissions: string[] = accountWithRoles.roles
       ? accountWithRoles.roles
           .flatMap((r) => r.permissions ?? [])
@@ -253,6 +257,7 @@ export class AuthService {
       sub: account.id,
       email: account.email,
       type: account instanceof Admin ? 'admin' : 'user',
+      roles: Array.from(new Set(roleNames)),
       permissions: Array.from(new Set(permissions)),
     };
 
@@ -268,7 +273,6 @@ export class AuthService {
 
     return { accessToken, refreshToken };
   }
-  // Inside AuthService
 
   /**
    * Validates or provisions a user arriving via OAuth.

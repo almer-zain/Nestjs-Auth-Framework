@@ -98,6 +98,7 @@ export class AdminsService {
    * Fetches a specific administrator by primary key.
    *
    * @param id - Unique identifier of the admin
+   * @param currentUser - Current authenticated user
    * @returns The admin entity with full permission tree
    * @throws NotFoundException if the admin does not exist
    */
@@ -127,6 +128,7 @@ export class AdminsService {
    *
    * @param id - Target admin ID
    * @param dto - Partial update data
+   * @param currentUser - Current authenticated user
    * @returns The updated Admin entity
    */
   async update(
@@ -187,7 +189,7 @@ export class AdminsService {
   }
 
   /**
-   * Performs a privacy-compliant soft delete.
+   * Performs a soft delete.
    * Overwrites sensitive identifiers (PII) before marking the record as deleted.
    *
    * @param id - Target admin ID
@@ -196,18 +198,39 @@ export class AdminsService {
   async remove(id: number): Promise<void> {
     const admin = await this.findOne(id);
 
-    // Scrubbing PII for data retention compliance
-    admin.email = `deleted-admin-${id}@internal.system`;
-    admin.username = `deleted_admin_${id}`;
-    admin.displayName = 'Deleted Admin';
-    admin.password = 'SCRUBBED';
-    admin.isTwoFactorEnabled = false;
-    admin.twoFactorSecret = null;
-
-    // Persist scrubbed state then soft-remove
-    await this.adminsRepository.save(admin);
     await this.adminsRepository.softRemove(admin);
 
     this.logger.warn(`Admin record scrubbed and soft-deleted: ID ${id}`);
+  }
+
+  /**
+   * Restores a soft-deleted user during the 30-day grace period.
+   *
+   * @param id - Target user ID
+   * @returns The restored User entity
+   * @throws NotFoundException if user doesn't exist
+   * @throws ConflictException if user is not deleted
+   */
+  async restore(id: number): Promise<Admin> {
+    // Fetch user including soft-deleted records (withDeleted: true)
+    const user = await this.adminsRepository.findOne({
+      where: { id },
+      withDeleted: true,
+    });
+
+    if (!user) {
+      this.logger.error(`Restore failed: User ID ${id} not found`);
+      throw new NotFoundException(`User with ID ${id} not found`);
+    }
+
+    if (!user.deletedAt) {
+      throw new ConflictException(`User ID ${id} is not deleted`);
+    }
+
+    // Recover the record (clears deletedAt timestamp)
+    await this.adminsRepository.recover(user);
+
+    this.logger.log(`User account restored successfully: ID ${id}`);
+    return user;
   }
 }

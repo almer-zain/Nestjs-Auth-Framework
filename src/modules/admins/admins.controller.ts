@@ -77,4 +77,11 @@ export class AdminsController {
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.adminsService.remove(id);
   }
+
+  @Post('/restore/:id')
+  @RequirePermissions('admins.restore')
+  @ApiOperation({ summary: 'Restore soft-deleted administrator' })
+  restore(@Param('id', ParseIntPipe) id: number) {
+    return this.adminsService.remove(id);
+  }
 }
