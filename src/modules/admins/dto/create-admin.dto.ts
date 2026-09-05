@@ -10,9 +10,9 @@ import {
   IsNumber,
 } from 'class-validator';
 import {
-  transformTrim,
-  transformSanitizeHtml,
   transformEmail,
+  transformSanitizeHtml,
+  transformSanitizeHtmlClean,
 } from 'src/utils/sanitize.util'; // Adjust path to match your layout
 
 export class CreateAdminDto {
@@ -24,7 +24,7 @@ export class CreateAdminDto {
   @ApiProperty()
   @IsString()
   @IsNotEmpty()
-  @Transform(transformTrim) // Standard string trimming
+  @Transform(transformSanitizeHtmlClean) // Standard string trimming
   username: string;
 
   @ApiProperty()

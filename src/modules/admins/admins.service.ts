@@ -5,13 +5,15 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { Admin } from './entities/admin.entity';
 import { CreateAdminDto } from './dto/create-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import * as bcrypt from 'bcrypt';
 import { Role } from '../roles/entities/role.entity';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
+import type { JwtPayload } from 'src/common/types/jwt-types';
+import { AccessControlUtil } from 'src/utils/access-control.util';
 
 @Injectable()
 export class AdminsService {
@@ -20,6 +22,8 @@ export class AdminsService {
   constructor(
     @InjectRepository(Admin)
     private readonly adminsRepository: Repository<Admin>,
+    @InjectRepository(Role)
+    private readonly rolesRepository: Repository<Role>,
   ) {}
 
   /**
@@ -31,7 +35,7 @@ export class AdminsService {
    * @throws ConflictException if email or username is already registered
    */
   async create(dto: CreateAdminDto): Promise<Admin> {
-    const { password, roleIds, ...rest } = dto;
+    const { password, roleIds, usernameDisplay, ...rest } = dto;
 
     const existing = await this.adminsRepository.findOne({
       where: [{ email: rest.email }, { username: rest.username }],
@@ -49,8 +53,10 @@ export class AdminsService {
     const hashedPassword = await bcrypt.hash(password, 10);
     const roles = roleIds ? roleIds.map((id) => ({ id }) as Role) : [];
 
+    // Map usernameDisplay from DTO to displayName on entity
     const newAdmin = this.adminsRepository.create({
       ...rest,
+      displayName: usernameDisplay,
       password: hashedPassword,
       roles,
     });
@@ -94,10 +100,19 @@ export class AdminsService {
    * Fetches a specific administrator by primary key.
    *
    * @param id - Unique identifier of the admin
+   * @param currentUser - Current authenticated user
    * @returns The admin entity with full permission tree
    * @throws NotFoundException if the admin does not exist
    */
-  async findOne(id: number): Promise<Admin> {
+  async findOne(id: number, currentUser?: JwtPayload): Promise<Admin> {
+    if (currentUser) {
+      AccessControlUtil.checkAdminOrOwner(
+        currentUser,
+        id,
+        'You are not authorized to view this admin profile',
+      );
+    }
+
     const admin = await this.adminsRepository.findOne({
       where: { id },
       relations: ['roles', 'roles.permissions'],
@@ -115,18 +130,61 @@ export class AdminsService {
    *
    * @param id - Target admin ID
    * @param dto - Partial update data
+   * @param currentUser - Current authenticated user
    * @returns The updated Admin entity
    */
-  async update(id: number, dto: UpdateAdminDto): Promise<Admin> {
-    const { password, roleIds, ...rest } = dto;
+  async update(
+    id: number,
+    dto: UpdateAdminDto,
+    currentUser: JwtPayload,
+  ): Promise<Admin> {
+    AccessControlUtil.checkAdminOrOwner(
+      currentUser,
+      id,
+      'You are not authorized to update this admin profile',
+    );
+
+    const isSuperAdmin = AccessControlUtil.isAdmin(currentUser);
+
+    if (!isSuperAdmin) {
+      delete dto.roleIds;
+    }
+
+    const { password, roleIds, usernameDisplay, ...rest } = dto;
     const admin = await this.findOne(id);
 
     if (password) {
       admin.password = await bcrypt.hash(password, 10);
     }
 
-    if (roleIds) {
-      admin.roles = roleIds.map((roleId) => ({ id: roleId }) as Role);
+    if (usernameDisplay) {
+      admin.displayName = usernameDisplay;
+    }
+
+    if (isSuperAdmin && roleIds) {
+      if (roleIds.length > 0) {
+        admin.roles = await this.rolesRepository.findBy({ id: In(roleIds) });
+      } else {
+        admin.roles = []; // Clear roles if empty array passed
+      }
+    }
+
+    if (rest.email || rest.username) {
+      const conflict = await this.adminsRepository.findOne({
+        where: [
+          { ...(rest.email && { email: rest.email }), id: Not(id) },
+          { ...(rest.username && { username: rest.username }), id: Not(id) },
+        ],
+      });
+
+      if (conflict) {
+        this.logger.warn(
+          `Update conflict: Admin ${id} attempted to use taken credentials`,
+        );
+        throw new ConflictException(
+          'Email or Username already taken by another admin',
+        );
+      }
     }
 
     Object.assign(admin, rest);
@@ -137,7 +195,7 @@ export class AdminsService {
   }
 
   /**
-   * Performs a privacy-compliant soft delete.
+   * Performs a soft delete.
    * Overwrites sensitive identifiers (PII) before marking the record as deleted.
    *
    * @param id - Target admin ID
@@ -146,18 +204,37 @@ export class AdminsService {
   async remove(id: number): Promise<void> {
     const admin = await this.findOne(id);
 
-    // Scrubbing PII for data retention compliance
-    admin.email = `deleted-admin-${id}@internal.system`;
-    admin.username = `deleted_admin_${id}`;
-    admin.displayName = 'Deleted Admin';
-    admin.password = 'SCRUBBED';
-    admin.isTwoFactorEnabled = false;
-    admin.twoFactorSecret = null;
-
-    // Persist scrubbed state then soft-remove
-    await this.adminsRepository.save(admin);
     await this.adminsRepository.softRemove(admin);
 
     this.logger.warn(`Admin record scrubbed and soft-deleted: ID ${id}`);
+  }
+
+  /**
+   * Restores a soft-deleted admin.
+   *
+   * @param id - Target admin ID
+   * @returns The restored Admin entity
+   * @throws NotFoundException if admin doesn't exist
+   * @throws ConflictException if admin is not deleted
+   */
+  async restore(id: number): Promise<Admin> {
+    const admin = await this.adminsRepository.findOne({
+      where: { id },
+      withDeleted: true,
+    });
+
+    if (!admin) {
+      this.logger.error(`Restore failed: Admin ID ${id} not found`);
+      throw new NotFoundException(`Admin with ID ${id} not found`);
+    }
+
+    if (!admin.deletedAt) {
+      throw new ConflictException(`Admin ID ${id} is not deleted`);
+    }
+
+    await this.adminsRepository.recover(admin);
+
+    this.logger.log(`Admin account restored successfully: ID ${id}`);
+    return admin;
   }
 }

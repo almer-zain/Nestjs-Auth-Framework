@@ -7,49 +7,44 @@ import {
 import { Reflector } from '@nestjs/core';
 import { RequestWithUser } from 'src/common/types/jwt-types';
 import { AccessControlUtil } from 'src/utils/access-control.util';
-import { REQUIRE_PERMISSIONS } from '../decorators/permissions.decorator';
+import { ROLES_KEY } from '../decorators/roles.decorator';
 
 @Injectable()
-export class PermissionsGuard implements CanActivate {
+export class RolesGuard implements CanActivate {
   constructor(private reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const requiredPermissions = this.reflector.getAllAndOverride<string[]>(
-      REQUIRE_PERMISSIONS,
+    const requiredRoles = this.reflector.getAllAndOverride<string[]>(
+      ROLES_KEY,
       [context.getHandler(), context.getClass()],
     );
 
-    // If no permission decorator is present, allow access
-    if (!requiredPermissions || requiredPermissions.length === 0) {
+    // If no @Roles() decorator is present, pass through!
+    if (!requiredRoles || requiredRoles.length === 0) {
       return true;
     }
 
     const request = context.switchToHttp().getRequest<RequestWithUser>();
-
     const user = request.user;
 
     if (!user) {
       throw new ForbiddenException('User context not found');
     }
 
+    // SuperAdmin bypass check
     if (AccessControlUtil.isAdmin(user)) {
       return true;
     }
 
-    // Checks if user possesses ALL required permissions for the endpoint
-    const hasAllPermissions = requiredPermissions.every((perm) =>
-      user.permissions.includes(perm),
-    );
+    // Check if user's account type or assigned roles match required roles
+    const hasRole = requiredRoles.includes(user.type);
 
-    if (!user.permissions || user.permissions.length === 0) {
-      throw new ForbiddenException('No permissions assigned to this account');
-    }
-
-    if (!hasAllPermissions) {
+    if (!hasRole) {
       throw new ForbiddenException(
-        `Insufficient permissions. Required: [${requiredPermissions.join(', ')}]`,
+        `Requires one of the following roles: [${requiredRoles.join(', ')}]`,
       );
     }
+
     return true;
   }
 }

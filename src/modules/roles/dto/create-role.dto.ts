@@ -9,7 +9,7 @@ import {
   Matches,
   MaxLength,
 } from 'class-validator';
-import { transformTrimAndLowercase } from 'src/utils/sanitize.util';
+import { transformSanitizeHtmlClean } from 'src/utils/sanitize.util';
 
 export class CreateRoleDto {
   @ApiProperty({ example: 'super-admin' })
@@ -20,7 +20,7 @@ export class CreateRoleDto {
     message:
       'Role name can only contain lowercase letters, numbers, and hyphens.',
   })
-  @Transform(transformTrimAndLowercase)
+  @Transform(transformSanitizeHtmlClean)
   name: string;
 
   @ApiPropertyOptional({ example: [1, 2, 3] })

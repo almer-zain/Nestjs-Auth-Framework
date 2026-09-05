@@ -97,6 +97,8 @@ export class PermissionsService {
    * @param id - Target permission ID
    * @param dto - Partial update data
    * @returns The updated Permission entity
+   * @throws NotFoundException if the ID does not exist
+   * @throws ConflictException if the permission name already taken
    */
   async update(id: number, dto: UpdatePermissionDto): Promise<Permission> {
     const permission = await this.findOne(id);
@@ -124,10 +126,38 @@ export class PermissionsService {
    * Permanently deletes a permission from the system.
    *
    * @param id - Target permission ID
+   * @throws NotFoundException if the permissions not found
    */
   async remove(id: number): Promise<void> {
     const permission = await this.findOne(id);
-    await this.permissionRepo.remove(permission);
-    this.logger.warn(`Permission deleted: ID ${id} (${permission.name})`);
+    await this.permissionRepo.softRemove(permission);
+    this.logger.warn(`Permission soft-deleted: ID ${id} (${permission.name})`);
+  }
+
+  /**
+   * Restores a soft-deleted permission.
+   *
+   * @param id - Target permission ID
+   * @throws NotFoundException if the permissions not found
+   * @throws ConflictException if the permissions not soft-deleted
+   */
+  async restore(id: number): Promise<Permission> {
+    const permission = await this.permissionRepo.findOne({
+      where: { id },
+      withDeleted: true,
+    });
+
+    if (!permission) {
+      this.logger.error(`Restore failed: Permission ID ${id} not found`);
+      throw new NotFoundException(`Permission with ID ${id} not found`);
+    }
+
+    if (!permission.deletedAt) {
+      throw new ConflictException(`Permission ID ${id} is not deleted`);
+    }
+
+    await this.permissionRepo.recover(permission);
+    this.logger.log(`Permission restored: ID ${id} (${permission.name})`);
+    return permission;
   }
 }

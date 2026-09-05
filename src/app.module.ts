@@ -26,6 +26,8 @@ import Redis from 'ioredis';
 import { LoggerModule } from 'nestjs-pino';
 import { RolesModule } from './modules/roles/roles.module';
 import { PermissionsModule } from './modules/permissions/permissions.module';
+import { UsersModule } from './modules/users/users.module';
+import { AuthModule } from './modules/auth/auth.module';
 @Module({
   imports: [
     // CONFIGURATION (Strict Validation)
@@ -39,6 +41,7 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
           .valid('development', 'production', 'test')
           .default('development'),
         PORT: Joi.number().default(3000),
+        URL: Joi.string().default('http://127.0.0.1'),
         FRONTEND_URL: Joi.string().uri().required(),
 
         // JWT
@@ -67,6 +70,8 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
         USE_REDIS: Joi.boolean().default(false),
         REDIS_HOST: Joi.string().default('localhost'),
         REDIS_PORT: Joi.number().default(6379),
+        REDIS_USERNAME: Joi.string().default(''),
+        REDIS_PASSWORD: Joi.string().default(''),
 
         // Mail
         MAIL_HOST: Joi.string().required(),
@@ -141,17 +146,23 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
       inject: [ConfigService],
       useFactory: async (config: ConfigService) => {
         if (config.get<boolean>('USE_REDIS')) {
+          const rawUsername = config.get<string>('REDIS_USERNAME');
+          const rawPassword = config.get<string>('REDIS_PASSWORD');
+
           return {
             store: await redisStore({
               socket: {
-                host: config.get<string>('REDIS_HOST'),
-                port: config.get<number>('REDIS_PORT'),
+                host: config.get<string>('REDIS_HOST', 'localhost'),
+                port: config.get<number>('REDIS_PORT', 6379),
+                reconnectStrategy: (retries) => Math.min(retries * 100, 3000),
               },
-              ttl: config.get<number>('CACHE_TTL') || 600,
+              username: rawUsername,
+              password: rawPassword,
+              ttl: (config.get<number>('CACHE_TTL') || 600) * 1000,
             }),
           };
         }
-        return { ttl: config.get<number>('CACHE_TTL') || 600 };
+        return { ttl: (config.get<number>('CACHE_TTL') || 600) * 1000 };
       },
     }),
 
@@ -183,6 +194,10 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
+        const rawPassword = config.get<string>('REDIS_PASSWORD')?.trim();
+        const redisPassword =
+          rawPassword && rawPassword.length > 0 ? rawPassword : undefined;
+
         return {
           throttlers: [
             {
@@ -195,6 +210,7 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
                 new Redis({
                   host: config.get<string>('REDIS_HOST', 'localhost'),
                   port: config.get<number>('REDIS_PORT', 6379),
+                  ...(redisPassword ? { password: redisPassword } : {}),
                 }),
               )
             : undefined,
@@ -209,7 +225,9 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
     // APP MODULES
     HealthModule,
     AdminsModule,
+    UsersModule,
     PermissionsModule,
+    AuthModule,
     RolesModule,
   ],
   providers: [JwtAccessStrategy, JwtRefreshStrategy],

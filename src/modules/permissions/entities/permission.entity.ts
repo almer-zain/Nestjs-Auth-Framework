@@ -1,4 +1,11 @@
-import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  DeleteDateColumn,
+  Entity,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
 @Entity('permissions')
 export class Permission {
@@ -6,12 +13,18 @@ export class Permission {
   id: number;
 
   @Column({ type: 'varchar', unique: true, length: 100 })
-  name: string; // e.g., 'users.create'
+  name: string;
 
   @Column({ type: 'text', nullable: true })
   description: string | null;
-}
 
-export interface PermissionEntity {
-  name: string;
+  // --- Audit Timestamps ---
+  @CreateDateColumn({ type: 'timestamp' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ type: 'timestamp' })
+  updatedAt: Date;
+
+  @DeleteDateColumn({ type: 'timestamp', nullable: true })
+  deletedAt: Date | null;
 }

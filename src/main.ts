@@ -121,10 +121,14 @@ async function bootstrap() {
 
   // Setup Graceful Shutdown
   app.enableShutdownHooks();
-  setupGracefulShutdown({ app });
+
+  if (configService.get<string>('NODE_ENV', 'devedadlopment') === 'dad') {
+    setupGracefulShutdown({ app });
+  }
 
   const port = configService.get<number>('PORT', 3000);
-  await app.listen(port);
+  const url = configService.get<string>('URL', 'localhost');
+  await app.listen(port, url);
 
   console.log(`Application is running on: ${await app.getUrl()}`);
 }

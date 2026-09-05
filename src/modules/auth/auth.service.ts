@@ -4,6 +4,7 @@ import {
   BadRequestException,
   Inject,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -12,7 +13,7 @@ import * as crypto from 'crypto';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { generateSecret, generateURI, verify } from 'otplib';
 import * as QRCode from 'qrcode';
-import type { ConfigService, ConfigType } from '@nestjs/config';
+import { ConfigService, type ConfigType } from '@nestjs/config';
 
 import { User } from '../users/entities/user.entity';
 import { Admin } from '../admins/entities/admin.entity';
@@ -57,13 +58,25 @@ export class AuthService {
    *
    * @param data - Registration payload
    * @param accountType - Target entity table
+   * @returns - User data and metadata
    */
   async register(data: RegisterDto, accountType: 'user' | 'admin' = 'user') {
     await this.captchaService.verify(data.captchaToken);
     const repo = this.getRepo(accountType);
 
     const hashedPassword = await bcrypt.hash(data.password, 10);
-    const account = repo.create({ ...data, password: hashedPassword });
+    const dataObj = data as unknown as Record<string, unknown>;
+    const displayName =
+      (typeof dataObj.displayName === 'string' && dataObj.displayName) ||
+      (typeof dataObj.usernameDisplay === 'string' &&
+        dataObj.usernameDisplay) ||
+      data.username;
+
+    const account = repo.create({
+      ...data,
+      displayName,
+      password: hashedPassword,
+    });
 
     return repo.save(account);
   }
@@ -74,6 +87,7 @@ export class AuthService {
    * @param data - Login credentials and metadata
    * @param accountType - Entity discriminator
    * @returns Tokens or MFA requirement state
+   * @throws {UnauthorizedException} If the credentials is invalid
    */
   async login(data: LoginDto, accountType: 'user' | 'admin' = 'user') {
     await this.captchaService.verify(data.captchaToken, data.ip);
@@ -116,6 +130,11 @@ export class AuthService {
 
   /**
    * Initializes TOTP-based 2FA for an account.
+   *
+   * @param userId - Target User Id
+   * @param accountType - Entity discriminator
+   * @returns Secret code, QR code, and URL
+   * @throws {BadRequestException} if account is not found
    */
   async generate2FASecret(
     userId: number,
@@ -141,6 +160,14 @@ export class AuthService {
 
   /**
    * Validates a 2FA token and completes the authentication handshake.
+   *
+   * @param data - 2 Factor Authentications Data
+   * @param ip - IP of the device
+   * @param userAgent - IP of the device
+   * @returns Generated secret code, QR code, and URL
+   * @throws {BadRequestException} If account is not found
+   * @throws {UnauthorizedException} If 2 factor authentication hasn't been initialized
+   * @throws {UnauthorizedException} If 2 factor authentication token is invalid
    */
   async verify2FA(data: Verify2FADto, ip: string, userAgent: string) {
     const { userId, token, accountType = 'user' } = data;
@@ -150,6 +177,10 @@ export class AuthService {
       where: { id: userId },
       relations: ['roles', 'roles.permissions'],
     });
+
+    if (!account) {
+      throw new NotFoundException(`Account with ID ${userId} not found`);
+    }
 
     if (!account?.twoFactorSecret)
       throw new UnauthorizedException('2FA not initialized');
@@ -173,6 +204,9 @@ export class AuthService {
 
   /**
    * Generates a unique password reset link and short-code.
+   *
+   * @param email - Target email
+   * @param accountType - Entity discriminator
    */
   async forgotPassword(email: string, accountType: 'user' | 'admin' = 'user') {
     const repo = this.getRepo(accountType);
@@ -182,9 +216,9 @@ export class AuthService {
 
     const token = crypto.randomBytes(32).toString('hex');
     const shortCode = token.substring(0, 6).toUpperCase();
-    const expires = new Date(
-      Date.now() + this.configService.get<number>('EXPIRY_EMAIL')!,
-    );
+    const expiryMs =
+      Number(this.configService.get<number>('EXPIRY_EMAIL')) || 15 * 60 * 1000;
+    const expires = new Date(Date.now() + expiryMs);
 
     await repo.update(account.id, {
       passwordResetCode: token,
@@ -206,6 +240,10 @@ export class AuthService {
 
   /**
    * Finalizes credential update using a verified reset token.
+   *
+   * @param email - Target email
+   * @param accountType - Entity discriminator
+   * @throws {BadRequestException} If reset token is invalid or expired
    */
   async resetPassword(
     data: ResetPasswordDto,
@@ -238,9 +276,16 @@ export class AuthService {
   /**
    * Issues JWT Access and Refresh tokens.
    * Flattens the existing roles/permissions structure into a unique string array.
+   *
+   * @param account - Entity discriminator
+   * @returns Generated access and refresh token
    */
   async generateTokens(account: User | Admin) {
     const accountWithRoles = account as unknown as AccountWithRoles;
+
+    const roleNames: string[] = accountWithRoles.roles
+      ? accountWithRoles.roles.map((r) => r.name).filter(Boolean)
+      : [];
 
     const permissions: string[] = accountWithRoles.roles
       ? accountWithRoles.roles
@@ -253,6 +298,7 @@ export class AuthService {
       sub: account.id,
       email: account.email,
       type: account instanceof Admin ? 'admin' : 'user',
+      roles: Array.from(new Set(roleNames)),
       permissions: Array.from(new Set(permissions)),
     };
 
@@ -268,12 +314,14 @@ export class AuthService {
 
     return { accessToken, refreshToken };
   }
-  // Inside AuthService
 
   /**
    * Validates or provisions a user arriving via OAuth.
    *
-   * @param profile - The normalized data from the OAuth strategy
+   * @param email - Entity discriminator
+   * @param firstName - Entity discriminator
+   * @param lastName - Entity discriminator
+   * @returns - Final user tokens
    */
   async validateOAuthUser(profile: {
     email: string;
