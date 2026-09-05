@@ -23,19 +23,20 @@ import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
+import { PermissionsGuard } from '../permissions/guards/permissions.guard';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
-import { RequirePermissions } from '../permissions/decorators/permissions.decorator';
 import type { JwtPayload } from 'src/common/types/jwt-types';
 import { CurrentUser } from 'src/common/decorator/current-user.decorator';
+import { RequirePermissions } from '../permissions/decorators/permissions.decorator';
 
 @ApiTags('Users')
 @ApiBearerAuth()
 @Controller('users')
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @UseInterceptors(ClassSerializerInterceptor)
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  @UseGuards(JwtAuthGuard)
   @Post()
   @RequirePermissions('users.create')
   @ApiOperation({ summary: 'Register a new user' })
@@ -43,7 +44,6 @@ export class UsersController {
     return this.usersService.create(createUserDto);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get()
   @RequirePermissions('users.read')
   @ApiOperation({ summary: 'Retrieve paginated user list' })
@@ -56,14 +56,15 @@ export class UsersController {
     return this.usersService.findAll(query);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get(':id')
   @ApiOperation({ summary: 'Fetch user by unique ID' })
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.usersService.findOne(id);
+  findOne(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() currentUser: JwtPayload,
+  ) {
+    return this.usersService.findOne(id, currentUser);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Patch(':id')
   @ApiOperation({ summary: 'Update existing user profile' })
   update(
@@ -74,17 +75,15 @@ export class UsersController {
     return this.usersService.update(id, updateUserDto, currentUser);
   }
 
-  @UseGuards(JwtAuthGuard)
-  @RequirePermissions('users.delete')
   @Delete(':id')
+  @RequirePermissions('users.delete')
   @ApiOperation({ summary: 'Scrub and soft-delete user' })
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.usersService.remove(id);
   }
 
-  @UseGuards(JwtAuthGuard)
-  @RequirePermissions('users.restore')
   @Patch(':id/restore')
+  @RequirePermissions('users.restore')
   @ApiOperation({ summary: 'Restore soft-delete user' })
   restore(@Param('id', ParseIntPipe) id: number) {
     return this.usersService.restore(id);

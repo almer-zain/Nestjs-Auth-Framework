@@ -35,22 +35,32 @@ export class UsersService {
    * @throws ConflictException if email or username is already in use
    */
   async create(dto: CreateUserDto): Promise<User> {
+    const { password, roleIds, usernameDisplay, ...rest } = dto;
+
     const existing = await this.usersRepository.findOne({
-      where: [{ email: dto.email }, { username: dto.username }],
+      where: [{ email: rest.email }, { username: rest.username }],
     });
 
     if (existing) {
       this.logger.warn(
-        `Registration attempt failed: Identity conflict for ${dto.email}`,
+        `Registration attempt failed: Identity conflict for ${rest.email}`,
       );
       throw new ConflictException(
         'User with this email or username already exists',
       );
     }
 
-    const newUser = this.usersRepository.create(dto);
-    const savedUser = await this.usersRepository.save(newUser);
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const roles = roleIds ? roleIds.map((id) => ({ id }) as Role) : [];
 
+    const newUser = this.usersRepository.create({
+      ...rest,
+      displayName: usernameDisplay,
+      password: hashedPassword,
+      roles,
+    });
+
+    const savedUser = await this.usersRepository.save(newUser);
     this.logger.log(`User created successfully: ID ${savedUser.id}`);
     return savedUser;
   }
@@ -69,7 +79,7 @@ export class UsersService {
       skip,
       take: limit,
       order: { createdAt: 'DESC' },
-      relations: ['roles'], // Ensures roles are included in the list
+      relations: ['roles'],
     });
 
     return {
@@ -88,10 +98,19 @@ export class UsersService {
    * Finds a single user by primary key.
    *
    * @param id - The unique identifier of the user
+   * @param currentUser - Current authenticated user
    * @returns The user entity including roles
    * @throws NotFoundException if user does not exist
    */
-  async findOne(id: number): Promise<User> {
+  async findOne(id: number, currentUser?: JwtPayload): Promise<User> {
+    if (currentUser) {
+      AccessControlUtil.checkAdminOrOwner(
+        currentUser,
+        id,
+        'You are not authorized to view this user profile',
+      );
+    }
+
     const user = await this.usersRepository.findOne({
       where: { id },
       relations: ['roles'],
@@ -124,31 +143,36 @@ export class UsersService {
       'You are not authorized to update this user profile',
     );
 
-    const user = await this.findOne(id);
-    const isAdmin = AccessControlUtil.isAdmin(currentUser);
-    if (!isAdmin) {
-      delete dto.roleIds; // Prevents regular users from assigning roles to themselves!
-    }
+    const isSuperAdmin = AccessControlUtil.isAdmin(currentUser);
 
-    if (dto.password) {
-      user.password = await bcrypt.hash(dto.password, 10);
-      delete dto.password; // Remove raw password from dto so Object.assign doesn't overwrite hashed password
-    }
-
-    if (isAdmin && dto.roleIds) {
-      if (dto.roleIds.length > 0) {
-        user.roles = await this.rolesRepository.findBy({ id: In(dto.roleIds) });
-      } else {
-        user.roles = []; // Clear roles if empty array provided
-      }
+    if (!isSuperAdmin) {
       delete dto.roleIds;
     }
 
-    if (dto.email || dto.username) {
+    const { password, roleIds, usernameDisplay, ...rest } = dto;
+    const user = await this.findOne(id);
+
+    if (password) {
+      user.password = await bcrypt.hash(password, 10);
+    }
+
+    if (usernameDisplay) {
+      user.displayName = usernameDisplay;
+    }
+
+    if (isSuperAdmin && roleIds) {
+      if (roleIds.length > 0) {
+        user.roles = await this.rolesRepository.findBy({ id: In(roleIds) });
+      } else {
+        user.roles = [];
+      }
+    }
+
+    if (rest.email || rest.username) {
       const conflict = await this.usersRepository.findOne({
         where: [
-          { ...(dto.email && { email: dto.email }), id: Not(id) },
-          { ...(dto.username && { username: dto.username }), id: Not(id) },
+          { ...(rest.email && { email: rest.email }), id: Not(id) },
+          { ...(rest.username && { username: rest.username }), id: Not(id) },
         ],
       });
 
@@ -162,7 +186,7 @@ export class UsersService {
       }
     }
 
-    Object.assign(user, dto);
+    Object.assign(user, rest);
 
     const updated = await this.usersRepository.save(user);
     this.logger.log(`User updated: ID ${id}`);
@@ -178,15 +202,12 @@ export class UsersService {
    */
   async remove(id: number): Promise<void> {
     const user = await this.findOne(id);
-
-    // Mark as soft-deleted (sets deletedAt timestamp)
     await this.usersRepository.softRemove(user);
-
     this.logger.warn(`User account marked for soft-deletion: ID ${id}`);
   }
 
   /**
-   * Restores a soft-deleted user during the 30-day grace period.
+   * Restores a soft-deleted user.
    *
    * @param id - Target user ID
    * @returns The restored User entity
@@ -194,7 +215,6 @@ export class UsersService {
    * @throws ConflictException if user is not deleted
    */
   async restore(id: number): Promise<User> {
-    // Fetch user including soft-deleted records (withDeleted: true)
     const user = await this.usersRepository.findOne({
       where: { id },
       withDeleted: true,
@@ -209,9 +229,7 @@ export class UsersService {
       throw new ConflictException(`User ID ${id} is not deleted`);
     }
 
-    // Recover the record (clears deletedAt timestamp)
     await this.usersRepository.recover(user);
-
     this.logger.log(`User account restored successfully: ID ${id}`);
     return user;
   }

@@ -35,7 +35,7 @@ export class AdminsService {
    * @throws ConflictException if email or username is already registered
    */
   async create(dto: CreateAdminDto): Promise<Admin> {
-    const { password, roleIds, ...rest } = dto;
+    const { password, roleIds, usernameDisplay, ...rest } = dto;
 
     const existing = await this.adminsRepository.findOne({
       where: [{ email: rest.email }, { username: rest.username }],
@@ -53,8 +53,10 @@ export class AdminsService {
     const hashedPassword = await bcrypt.hash(password, 10);
     const roles = roleIds ? roleIds.map((id) => ({ id }) as Role) : [];
 
+    // Map usernameDisplay from DTO to displayName on entity
     const newAdmin = this.adminsRepository.create({
       ...rest,
+      displayName: usernameDisplay,
       password: hashedPassword,
       roles,
     });
@@ -148,11 +150,15 @@ export class AdminsService {
       delete dto.roleIds;
     }
 
-    const { password, roleIds, ...rest } = dto;
+    const { password, roleIds, usernameDisplay, ...rest } = dto;
     const admin = await this.findOne(id);
 
     if (password) {
       admin.password = await bcrypt.hash(password, 10);
+    }
+
+    if (usernameDisplay) {
+      admin.displayName = usernameDisplay;
     }
 
     if (isSuperAdmin && roleIds) {
@@ -204,33 +210,31 @@ export class AdminsService {
   }
 
   /**
-   * Restores a soft-deleted user during the 30-day grace period.
+   * Restores a soft-deleted admin.
    *
-   * @param id - Target user ID
-   * @returns The restored User entity
-   * @throws NotFoundException if user doesn't exist
-   * @throws ConflictException if user is not deleted
+   * @param id - Target admin ID
+   * @returns The restored Admin entity
+   * @throws NotFoundException if admin doesn't exist
+   * @throws ConflictException if admin is not deleted
    */
   async restore(id: number): Promise<Admin> {
-    // Fetch user including soft-deleted records (withDeleted: true)
-    const user = await this.adminsRepository.findOne({
+    const admin = await this.adminsRepository.findOne({
       where: { id },
       withDeleted: true,
     });
 
-    if (!user) {
-      this.logger.error(`Restore failed: User ID ${id} not found`);
-      throw new NotFoundException(`User with ID ${id} not found`);
+    if (!admin) {
+      this.logger.error(`Restore failed: Admin ID ${id} not found`);
+      throw new NotFoundException(`Admin with ID ${id} not found`);
     }
 
-    if (!user.deletedAt) {
-      throw new ConflictException(`User ID ${id} is not deleted`);
+    if (!admin.deletedAt) {
+      throw new ConflictException(`Admin ID ${id} is not deleted`);
     }
 
-    // Recover the record (clears deletedAt timestamp)
-    await this.adminsRepository.recover(user);
+    await this.adminsRepository.recover(admin);
 
-    this.logger.log(`User account restored successfully: ID ${id}`);
-    return user;
+    this.logger.log(`Admin account restored successfully: ID ${id}`);
+    return admin;
   }
 }

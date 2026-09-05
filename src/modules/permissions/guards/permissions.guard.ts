@@ -5,9 +5,9 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { REQUIRE_PERMISSIONS } from 'src/common/decorator/permissions.decorator';
 import { RequestWithUser } from 'src/common/types/jwt-types';
 import { AccessControlUtil } from 'src/utils/access-control.util';
+import { REQUIRE_PERMISSIONS } from '../decorators/permissions.decorator';
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {

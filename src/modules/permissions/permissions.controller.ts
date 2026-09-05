@@ -66,4 +66,11 @@ export class PermissionsController {
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.permissionsService.remove(id);
   }
+
+  @Patch(':id/restore')
+  @RequirePermissions('permissions.restore')
+  @ApiOperation({ summary: 'Restore a soft-deleted permission' })
+  restore(@Param('id', ParseIntPipe) id: number) {
+    return this.permissionsService.restore(id);
+  }
 }

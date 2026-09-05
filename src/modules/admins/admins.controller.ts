@@ -23,14 +23,15 @@ import { CreateAdminDto } from './dto/create-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
-import { RequirePermissions } from '../permissions/decorators/permissions.decorator';
+import { PermissionsGuard } from '../permissions/guards/permissions.guard';
 import { CurrentUser } from 'src/common/decorator/current-user.decorator';
 import type { JwtPayload } from 'src/common/types/jwt-types';
+import { RequirePermissions } from '../permissions/decorators/permissions.decorator';
 
 @ApiTags('Admins')
 @ApiBearerAuth()
 @Controller('admins')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @UseInterceptors(ClassSerializerInterceptor)
 export class AdminsController {
   constructor(private readonly adminsService: AdminsService) {}
@@ -78,10 +79,10 @@ export class AdminsController {
     return this.adminsService.remove(id);
   }
 
-  @Post('/restore/:id')
+  @Patch(':id/restore')
   @RequirePermissions('admins.restore')
   @ApiOperation({ summary: 'Restore soft-deleted administrator' })
   restore(@Param('id', ParseIntPipe) id: number) {
-    return this.adminsService.remove(id);
+    return this.adminsService.restore(id);
   }
 }

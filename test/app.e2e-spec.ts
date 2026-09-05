@@ -1,3 +1,19 @@
+jest.mock('@nestjs-modules/mailer/adapters/handlebars.adapter', () => ({
+  HandlebarsAdapter: jest.fn().mockImplementation(() => ({
+    compile: jest.fn(),
+  })),
+}));
+
+jest.mock('nestjs-graceful-shutdown', () => ({
+  GracefulShutdownModule: {
+    forRoot: jest.fn().mockReturnValue({ module: class {}, providers: [] }),
+    forRootAsync: jest
+      .fn()
+      .mockReturnValue({ module: class {}, providers: [] }),
+  },
+  setupGracefulShutdown: jest.fn(),
+}));
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
@@ -7,13 +23,19 @@ import { AppModule } from './../src/app.module';
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
-  beforeEach(async () => {
+  beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
     app = moduleFixture.createNestApplication();
-    await app.init();
+    await app.listen(0);
+  });
+
+  afterAll(async () => {
+    if (app) {
+      await app.close();
+    }
   });
 
   it('/ (GET)', () => {
@@ -21,9 +43,5 @@ describe('AppController (e2e)', () => {
       .get('/')
       .expect(200)
       .expect('Hello World!');
-  });
-
-  afterEach(async () => {
-    await app.close();
   });
 });
