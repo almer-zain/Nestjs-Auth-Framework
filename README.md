@@ -1,4 +1,4 @@
-# blog-be
+# NestJS Auth Framework
 
 ![License](https://img.shields.io/badge/license-UNLICENSED-red)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7.3-3178C6?logo=typescript)
