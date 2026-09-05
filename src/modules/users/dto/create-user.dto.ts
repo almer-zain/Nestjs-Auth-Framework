@@ -11,6 +11,7 @@ import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   transformEmail,
+  transformSanitizeHtml,
   transformSanitizeHtmlClean,
 } from 'src/utils/sanitize.util';
 
@@ -29,7 +30,7 @@ export class CreateUserDto {
   @ApiProperty()
   @IsString()
   @IsNotEmpty()
-  @Transform(transformSanitizeHtmlClean) // Strips out malicious HTML/Script tags
+  @Transform(transformSanitizeHtml) // Strips out malicious HTML/Script tags
   usernameDisplay: string;
 
   @ApiProperty()

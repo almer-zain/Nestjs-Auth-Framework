@@ -2,6 +2,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  BadRequestException,
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -127,14 +128,72 @@ export class RolesService {
   }
 
   /**
-   * Permanently removes a role from the system.
-   * Note: This will cascade to the roles_permissions join table.
+   * Soft-deletes a role.
+   * Optionally reassigns all users/admins holding this role to a replacement role first.
+   *
+   * @param id - Role ID to delete
+   * @param reassignToRoleId - Optional replacement Role ID
+   * @throws BadRequestException If cannot reassign to the role being deleted
+   * @throws ConflictException if the role is not deleted
+   */
+  async remove(id: number, reassignToRoleId?: number): Promise<void> {
+    const roleToDelete = await this.findOne(id);
+
+    // If a replacement role is provided, migrate users & admins
+    if (reassignToRoleId) {
+      if (reassignToRoleId === id) {
+        throw new BadRequestException(
+          'Cannot reassign to the role being deleted',
+        );
+      }
+
+      const replacementRole = await this.findOne(reassignToRoleId);
+
+      // Reassign users holding the deleted role to the replacement role
+      await this.roleRepo.manager.query(
+        `UPDATE "users_roles_roles" SET "rolesId" = $1 WHERE "rolesId" = $2`,
+        [replacementRole.id, roleToDelete.id],
+      );
+
+      // Reassign admins holding the deleted role to the replacement role
+      await this.roleRepo.manager.query(
+        `UPDATE "admin_roles_roles" SET "rolesId" = $1 WHERE "rolesId" = $2`,
+        [replacementRole.id, roleToDelete.id],
+      );
+
+      this.logger.log(
+        `Reassigned accounts from Role ID ${id} to Role ID ${reassignToRoleId}`,
+      );
+    }
+
+    await this.roleRepo.softRemove(roleToDelete);
+    this.logger.warn(`Role soft-deleted: ID ${id} (${roleToDelete.name})`);
+  }
+
+  /**
+   * Restores a soft-deleted role.
    *
    * @param id - Target role ID
+   * @returns The restored Role entity
+   * @throws NotFoundException if the role is not found
+   * @throws ConflictException if the role is not deleted
    */
-  async remove(id: number): Promise<void> {
-    const role = await this.findOne(id);
-    await this.roleRepo.remove(role);
-    this.logger.warn(`Role deleted: ID ${id} (${role.name})`);
+  async restore(id: number): Promise<Role> {
+    const role = await this.roleRepo.findOne({
+      where: { id },
+      withDeleted: true,
+    });
+
+    if (!role) {
+      throw new NotFoundException(`Role ID ${id} not found`);
+    }
+
+    if (!role.deletedAt) {
+      throw new ConflictException(`Role ID ${id} is not deleted`);
+    }
+
+    await this.roleRepo.recover(role);
+    this.logger.log(`Role restored: ID ${id} (${role.name})`);
+    return role;
   }
 }

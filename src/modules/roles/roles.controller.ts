@@ -63,4 +63,11 @@ export class RolesController {
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.rolesService.remove(id);
   }
+
+  @Patch(':id/restore')
+  @RequirePermissions('roles.restore')
+  @ApiOperation({ summary: 'Restore a soft-deleted role' })
+  restore(@Param('id', ParseIntPipe) id: number) {
+    return this.rolesService.restore(id);
+  }
 }
