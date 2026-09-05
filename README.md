@@ -1,6 +1,6 @@
 # NestJS Auth Framework
 
-![License](https://img.shields.io/badge/license-UNLICENSED-red)
+![License](https://img.shields.io/badge/license-mit)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7.3-3178C6?logo=typescript)
 ![NestJS](https://img.shields.io/badge/NestJS-11.x-E0234E?logo=nestjs)
 ![PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL-336791?logo=postgresql)
