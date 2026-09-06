@@ -13,8 +13,8 @@ import { Exclude } from 'class-transformer';
 import { Role } from 'src/modules/roles/entities/role.entity';
 
 /**
- * Abstract base class for identity-based accounts (Users and Admins).
- * Provides core authentication fields, 2FA support, and lifecycle hooks for data sanitization.
+ * Abstract base class for identity-based accounts.
+ * Provides core authentication fields, 2FA support, token tracking, and lifecycle hooks.
  */
 export abstract class BaseAccount {
   @PrimaryGeneratedColumn()
@@ -33,20 +33,25 @@ export abstract class BaseAccount {
   @Exclude()
   password: string;
 
+  // --- Session & Refresh Token Invalidation ---
+  @Column({ type: 'varchar', nullable: true, select: false })
+  @Exclude()
+  refreshTokenHash: string | null;
+
   // --- Multi-Factor Authentication ---
   @Column({ type: 'boolean', default: false })
   isTwoFactorEnabled: boolean;
 
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', nullable: true, select: false })
   @Exclude()
   twoFactorSecret: string | null;
 
   // --- Password Recovery ---
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', nullable: true, select: false })
   @Exclude()
   passwordResetCode: string | null;
 
-  @Column({ type: 'timestamp', nullable: true })
+  @Column({ type: 'timestamp', nullable: true, select: false })
   @Exclude()
   passwordResetExpires: Date | null;
 
@@ -66,9 +71,21 @@ export abstract class BaseAccount {
   @Exclude()
   deletedAt: Date | null;
 
+  // --- Ban ---
+  @Column({ type: 'boolean', default: false })
+  isBanned: boolean;
+
+  @Column({ type: 'varchar', nullable: true })
+  banReason: string | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  bannedAt: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  bannedUntil: Date | null; // Null means permanent ban
+
   /**
    * Lifecycle hook to normalize data before database persistence.
-   * Ensures emails and usernames are stored in a consistent format.
    */
   @BeforeInsert()
   @BeforeUpdate()
@@ -78,7 +95,6 @@ export abstract class BaseAccount {
     }
 
     if (this.username) {
-      // Normalizing username to lowercase prevents "User1" and "user1" from being different accounts
       this.username = this.username.toLowerCase().trim();
     }
 

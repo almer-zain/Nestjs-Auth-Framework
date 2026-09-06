@@ -1,19 +1,21 @@
-// dto/verify-2fa.dto.ts
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsNumber, IsString, IsOptional } from 'class-validator';
+import { IsNotEmpty, IsString, Length } from 'class-validator';
 
 export class Verify2FADto {
-  @ApiProperty({ example: 1 })
-  @IsNumber()
-  userId: number;
-
-  @ApiProperty({ example: '123456' })
+  @ApiProperty({
+    description: 'Short-lived JWT ticket returned from /auth/login',
+    example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+  })
   @IsString()
   @IsNotEmpty()
-  token: string;
+  mfaTicket: string;
 
-  @ApiProperty({ example: 'user', required: false })
-  @IsOptional()
+  @ApiProperty({
+    description: '6-digit OTP from authenticator app',
+    example: '123456',
+  })
   @IsString()
-  accountType?: 'user' | 'admin';
+  @IsNotEmpty()
+  @Length(6, 6, { message: '2FA code must be exactly 6 digits' })
+  token: string;
 }

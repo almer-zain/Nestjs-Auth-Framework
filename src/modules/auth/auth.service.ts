@@ -8,15 +8,15 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import * as bcrypt from 'bcrypt';
+import * as argon2 from 'argon2';
 import * as crypto from 'crypto';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { generateSecret, generateURI, verify } from 'otplib';
 import * as QRCode from 'qrcode';
-import { ConfigService, type ConfigType } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
+import type { ConfigType } from '@nestjs/config';
 
 import { User } from '../users/entities/user.entity';
-import { Admin } from '../admins/entities/admin.entity';
 import { MailService } from '../mail/mail.service';
 import { CaptchaService } from './captcha.service';
 import { DeviceService } from './device.service';
@@ -28,6 +28,19 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { AccountWithRoles } from '../roles/entities/role.entity';
 import { getErrorStack } from 'src/utils/error.util';
 import { Verify2FADto } from './dto/verify-2fa.dto';
+import { Enable2FADto } from './dto/enable-2fa.dto';
+
+interface MfaTicketPayload {
+  sub: number;
+  purpose: 'mfa_validation';
+}
+
+export type AuthTokens = {
+  accessToken: string;
+  refreshToken: string;
+};
+
+export type LoginResult = AuthTokens | { mfaRequired: true; mfaTicket: string };
 
 @Injectable()
 export class AuthService {
@@ -35,8 +48,6 @@ export class AuthService {
 
   constructor(
     @InjectRepository(User) private readonly userRepository: Repository<User>,
-    @InjectRepository(Admin)
-    private readonly adminRepository: Repository<Admin>,
     private readonly jwtService: JwtService,
     private readonly mailService: MailService,
     private readonly configService: ConfigService,
@@ -47,76 +58,70 @@ export class AuthService {
   ) {}
 
   /**
-   * Internal helper to resolve the appropriate repository based on account type.
+   * Internal helper to hash reset tokens for secure database lookup.
    */
-  private getRepo(type: 'user' | 'admin') {
-    return type === 'admin' ? this.adminRepository : this.userRepository;
+  private hashToken(rawToken: string): string {
+    return crypto.createHash('sha256').update(rawToken).digest('hex');
   }
 
   /**
    * Registers a new account and hashes credentials.
    *
    * @param data - Registration payload
-   * @param accountType - Target entity table
    * @returns - User data and metadata
    */
-  async register(data: RegisterDto, accountType: 'user' | 'admin' = 'user') {
+  async register(data: RegisterDto): Promise<User> {
     await this.captchaService.verify(data.captchaToken);
-    const repo = this.getRepo(accountType);
 
-    const hashedPassword = await bcrypt.hash(data.password, 10);
-    const dataObj = data as unknown as Record<string, unknown>;
-    const displayName =
-      (typeof dataObj.displayName === 'string' && dataObj.displayName) ||
-      (typeof dataObj.usernameDisplay === 'string' &&
-        dataObj.usernameDisplay) ||
-      data.username;
-
-    const account = repo.create({
+    const hashedPassword = await argon2.hash(data.password, {
+      type: argon2.argon2id,
+    });
+    const account = this.userRepository.create({
       ...data,
-      displayName,
       password: hashedPassword,
     });
 
-    return repo.save(account);
+    return await this.userRepository.save(account);
   }
 
   /**
    * Authenticates credentials and evaluates MFA/Security requirements.
    *
    * @param data - Login credentials and metadata
-   * @param accountType - Entity discriminator
    * @returns Tokens or MFA requirement state
    * @throws {UnauthorizedException} If the credentials is invalid
    */
-  async login(data: LoginDto, accountType: 'user' | 'admin' = 'user') {
+  async login(data: LoginDto): Promise<LoginResult> {
     await this.captchaService.verify(data.captchaToken, data.ip);
-    const repo = this.getRepo(accountType);
 
-    const account = await repo.findOne({
+    const account = await this.userRepository.findOne({
       where: { email: data.email },
       select: ['id', 'email', 'password', 'isTwoFactorEnabled'],
       relations: ['roles', 'roles.permissions'],
     });
 
-    if (!account || !(await bcrypt.compare(data.password, account.password))) {
+    if (!account || !(await argon2.verify(account.password, data.password))) {
       this.logger.warn(`Auth Failure: Invalid attempt for ${data.email}`);
       throw new UnauthorizedException('Invalid credentials');
     }
 
     if (account.isTwoFactorEnabled) {
-      return { mfaRequired: true, userId: account.id, accountType };
+      const mfaTicket = await this.jwtService.signAsync(
+        {
+          sub: account.id,
+          purpose: 'mfa_validation',
+        } satisfies MfaTicketPayload,
+        {
+          secret: this.jwtConf.accessSecret,
+          expiresIn: '3m',
+        },
+      );
+      return { mfaRequired: true, mfaTicket };
     }
 
     // Background security check
     this.deviceService
-      .checkAndAlert(
-        account.id,
-        accountType,
-        account.email,
-        data.ip,
-        data.userAgent,
-      )
+      .checkAndAlert(account.id, 'user', account.email, data.ip, data.userAgent)
       .catch((err) =>
         this.logger.error(
           `Device check failed for ${account.email}`,
@@ -132,30 +137,60 @@ export class AuthService {
    * Initializes TOTP-based 2FA for an account.
    *
    * @param userId - Target User Id
-   * @param accountType - Entity discriminator
    * @returns Secret code, QR code, and URL
    * @throws {BadRequestException} if account is not found
    */
   async generate2FASecret(
     userId: number,
-    accountType: 'user' | 'admin' = 'user',
-  ) {
-    const repo = this.getRepo(accountType);
-    const account = await repo.findOneBy({ id: userId });
+  ): Promise<{ secret: string; qrCode: string; uri: string }> {
+    const account = await this.userRepository.findOneBy({ id: userId });
 
     if (!account) throw new BadRequestException('Account not found');
 
     const secret = generateSecret();
     const uri = generateURI({
-      issuer: 'AuthService',
+      issuer: this.configService.get<string>('APP_NAME', 'MyApp'),
       label: account.email,
       secret,
     });
     const qrCode = await QRCode.toDataURL(uri);
 
-    await repo.update(userId, { twoFactorSecret: secret });
+    await this.userRepository.update(userId, { twoFactorSecret: secret });
 
     return { secret, qrCode, uri };
+  }
+
+  /**
+   * Confirms 2FA setup by validating the first OTP token and activating 2FA.
+   *
+   * @param userId - Target User Id
+   * @param data - Enable 2FA payload
+   * @throws {BadRequestException} If 2FA has not been generated or code is invalid
+   */
+  async enable2FA(
+    userId: number,
+    data: Enable2FADto,
+  ): Promise<{ message: string }> {
+    const account = await this.userRepository.findOne({
+      where: { id: userId },
+      select: ['id', 'twoFactorSecret'],
+    });
+
+    if (!account?.twoFactorSecret) {
+      throw new BadRequestException('2FA not initialized');
+    }
+
+    const isValid = await verify({
+      secret: account.twoFactorSecret,
+      token: data.token,
+    });
+
+    if (!isValid) {
+      throw new BadRequestException('Invalid verification code');
+    }
+
+    await this.userRepository.update(userId, { isTwoFactorEnabled: true });
+    return { message: 'Two-factor authentication enabled successfully' };
   }
 
   /**
@@ -163,38 +198,55 @@ export class AuthService {
    *
    * @param data - 2 Factor Authentications Data
    * @param ip - IP of the device
-   * @param userAgent - IP of the device
-   * @returns Generated secret code, QR code, and URL
-   * @throws {BadRequestException} If account is not found
-   * @throws {UnauthorizedException} If 2 factor authentication hasn't been initialized
-   * @throws {UnauthorizedException} If 2 factor authentication token is invalid
+   * @param userAgent - User agent of the device
+   * @returns Generated access and refresh token
+   * @throws {NotFoundException} If account is not found
+   * @throws {UnauthorizedException} If 2FA ticket or token is invalid
    */
-  async verify2FA(data: Verify2FADto, ip: string, userAgent: string) {
-    const { userId, token, accountType = 'user' } = data;
-    const repo = this.getRepo(accountType);
+  async verify2FA(
+    data: Verify2FADto,
+    ip: string,
+    userAgent: string,
+  ): Promise<AuthTokens> {
+    let payload: MfaTicketPayload;
+    try {
+      payload = await this.jwtService.verifyAsync<MfaTicketPayload>(
+        data.mfaTicket,
+        { secret: this.jwtConf.accessSecret },
+      );
+      if (payload.purpose !== 'mfa_validation') {
+        throw new Error();
+      }
+    } catch {
+      throw new UnauthorizedException('MFA ticket expired or invalid');
+    }
 
-    const account = await repo.findOne({
-      where: { id: userId },
+    const account = await this.userRepository.findOne({
+      where: { id: payload.sub },
+      select: ['id', 'email', 'twoFactorSecret', 'isTwoFactorEnabled'],
       relations: ['roles', 'roles.permissions'],
     });
 
     if (!account) {
-      throw new NotFoundException(`Account with ID ${userId} not found`);
+      throw new NotFoundException(`Account with ID ${payload.sub} not found`);
     }
 
-    if (!account?.twoFactorSecret)
-      throw new UnauthorizedException('2FA not initialized');
+    if (!account.isTwoFactorEnabled || !account.twoFactorSecret) {
+      throw new UnauthorizedException('2FA not active for this account');
+    }
 
-    const isValid = await verify({ secret: account.twoFactorSecret, token });
+    const isValid = await verify({
+      secret: account.twoFactorSecret,
+      token: data.token,
+    });
+
     if (!isValid) {
-      this.logger.warn(`MFA Failure: Invalid token for ID ${userId}`);
+      this.logger.warn(`MFA Failure: Invalid token for ID ${payload.sub}`);
       throw new UnauthorizedException('Invalid 2FA token');
     }
 
-    await repo.update(userId, { isTwoFactorEnabled: true });
-
     this.deviceService
-      .checkAndAlert(account.id, accountType, account.email, ip, userAgent)
+      .checkAndAlert(account.id, 'user', account.email, ip, userAgent)
       .catch((err) =>
         this.logger.error(`Device check failed`, getErrorStack(err)),
       );
@@ -203,25 +255,69 @@ export class AuthService {
   }
 
   /**
+   * Refreshes access token and rotates the refresh token.
+   *
+   * @param refreshToken - Incoming plain refresh token
+   */
+  async refreshTokens(refreshToken: string): Promise<AuthTokens> {
+    let payload: { sub: number };
+    try {
+      payload = await this.jwtService.verifyAsync(refreshToken, {
+        secret: this.jwtConf.refreshSecret,
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+
+    const account = await this.userRepository.findOne({
+      where: { id: payload.sub },
+      select: ['id', 'email', 'refreshTokenHash'],
+      relations: ['roles', 'roles.permissions'],
+    });
+
+    if (!account || !account.refreshTokenHash) {
+      throw new UnauthorizedException('Access Denied');
+    }
+
+    const tokenMatches = await argon2.verify(
+      account.refreshTokenHash,
+      refreshToken,
+    );
+
+    if (!tokenMatches) {
+      await this.userRepository.update(account.id, { refreshTokenHash: null });
+      throw new UnauthorizedException(
+        'Token reuse detected. Session invalidated.',
+      );
+    }
+
+    return await this.generateTokens(account);
+  }
+
+  /**
    * Generates a unique password reset link and short-code.
    *
    * @param email - Target email
-   * @param accountType - Entity discriminator
    */
-  async forgotPassword(email: string, accountType: 'user' | 'admin' = 'user') {
-    const repo = this.getRepo(accountType);
-    const account = await repo.findOneBy({ email });
+  async forgotPassword(
+    email: string,
+  ): Promise<{ message: string; token?: string; resetUrl?: string }> {
+    const account = await this.userRepository.findOneBy({ email });
 
     if (!account) return { message: 'If email exists, code sent' };
 
-    const token = crypto.randomBytes(32).toString('hex');
-    const shortCode = token.substring(0, 6).toUpperCase();
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = this.hashToken(rawToken);
+    const shortCode = rawToken.substring(0, 6).toUpperCase();
+
     const expiryMs =
-      Number(this.configService.get<number>('EXPIRY_EMAIL')) || 15 * 60 * 1000;
+      Number(this.configService.get<number>('EMAIL_EXPIRY')) ||
+      Number(this.configService.get<number>('EXPIRY_EMAIL')) ||
+      15 * 60 * 1000;
     const expires = new Date(Date.now() + expiryMs);
 
-    await repo.update(account.id, {
-      passwordResetCode: token,
+    await this.userRepository.update(account.id, {
+      passwordResetCode: hashedToken,
       passwordResetExpires: expires,
     });
 
@@ -229,30 +325,26 @@ export class AuthService {
       'FRONTEND_URL',
       'http://localhost:3000',
     );
-    const resetUrl = `${frontendUrl}/reset-password?token=${token}&email=${email}`;
+    const resetUrl = `${frontendUrl}/reset-password?token=${rawToken}&email=${email}`;
 
     await this.mailService.sendPasswordResetEmail(email, shortCode, resetUrl);
 
     return this.configService.get('NODE_ENV') === 'development'
-      ? { message: 'Reset link generated', token, resetUrl }
+      ? { message: 'Reset link generated', token: rawToken, resetUrl }
       : { message: 'Reset link sent' };
   }
 
   /**
    * Finalizes credential update using a verified reset token.
    *
-   * @param email - Target email
-   * @param accountType - Entity discriminator
+   * @param data - Reset Password Payload
    * @throws {BadRequestException} If reset token is invalid or expired
    */
-  async resetPassword(
-    data: ResetPasswordDto,
-    accountType: 'user' | 'admin' = 'user',
-  ) {
-    const repo = this.getRepo(accountType);
-    const account = await repo.findOneBy({
+  async resetPassword(data: ResetPasswordDto): Promise<{ message: string }> {
+    const hashedToken = this.hashToken(data.code);
+    const account = await this.userRepository.findOneBy({
       email: data.email,
-      passwordResetCode: data.code,
+      passwordResetCode: hashedToken,
     });
 
     if (
@@ -263,11 +355,15 @@ export class AuthService {
       throw new BadRequestException('Invalid or expired code');
     }
 
-    const hashedPassword = await bcrypt.hash(data.newPassword, 10);
-    await repo.update(account.id, {
+    const hashedPassword = await argon2.hash(data.newPassword, {
+      type: argon2.argon2id,
+    });
+
+    await this.userRepository.update(account.id, {
       password: hashedPassword,
       passwordResetCode: null,
       passwordResetExpires: null,
+      refreshTokenHash: null,
     });
 
     return { message: 'Password updated successfully' };
@@ -277,10 +373,10 @@ export class AuthService {
    * Issues JWT Access and Refresh tokens.
    * Flattens the existing roles/permissions structure into a unique string array.
    *
-   * @param account - Entity discriminator
+   * @param account - User entity
    * @returns Generated access and refresh token
    */
-  async generateTokens(account: User | Admin) {
+  async generateTokens(account: User): Promise<AuthTokens> {
     const accountWithRoles = account as unknown as AccountWithRoles;
 
     const roleNames: string[] = accountWithRoles.roles
@@ -297,7 +393,6 @@ export class AuthService {
     const payload = {
       sub: account.id,
       email: account.email,
-      type: account instanceof Admin ? 'admin' : 'user',
       roles: Array.from(new Set(roleNames)),
       permissions: Array.from(new Set(permissions)),
     };
@@ -312,63 +407,68 @@ export class AuthService {
       expiresIn: this.jwtConf.refreshExpiry,
     } as JwtSignOptions);
 
+    const refreshTokenHash = await argon2.hash(refreshToken, {
+      type: argon2.argon2id,
+    });
+    await this.userRepository.update(account.id, { refreshTokenHash });
+
     return { accessToken, refreshToken };
+  }
+
+  /**
+   * Logs out user by invalidating the refresh token hash.
+   *
+   * @param userId - Target User Id
+   */
+  async logout(userId: number): Promise<{ message: string }> {
+    await this.userRepository.update(userId, { refreshTokenHash: null });
+    return { message: 'Logged out successfully' };
   }
 
   /**
    * Validates or provisions a user arriving via OAuth.
    *
-   * @param email - Entity discriminator
-   * @param firstName - Entity discriminator
-   * @param lastName - Entity discriminator
+   * @param profile - OAuth Profile payload
    * @returns - Final user tokens
    */
   async validateOAuthUser(profile: {
     email: string;
     firstName: string;
     lastName: string;
-  }) {
+  }): Promise<AuthTokens> {
     const { email, firstName, lastName } = profile;
-    const repo = this.userRepository; // OAuth usually targets standard users
 
-    // 1. Check for existing user
-    const user = await repo.findOne({
+    const user = await this.userRepository.findOne({
       where: { email },
       relations: ['roles', 'roles.permissions'],
     });
 
     if (user) {
       this.logger.log(`OAuth Login: ${email} authenticated via Google`);
-      return this.generateTokens(user);
+      return await this.generateTokens(user);
     }
 
-    // 2. Provision new user if not found
     this.logger.log(`OAuth Provisioning: Creating new account for ${email}`);
 
-    // Generate unusable password for security
-    const placeholderPassword = await bcrypt.hash(
+    const placeholderPassword = await argon2.hash(
       crypto.randomBytes(64).toString('hex'),
-      10,
+      { type: argon2.argon2id },
     );
 
-    const newUser = repo.create({
+    const newUser = this.userRepository.create({
       email,
       username: email.split('@')[0] + crypto.randomInt(1000, 9999),
       displayName: `${firstName} ${lastName}`.trim() || email.split('@')[0],
       password: placeholderPassword,
     });
 
-    // Optional: Assign a default 'user' role here if your Role system is ready
-    // newUser.roles = [await this.roleRepo.findOneBy({ name: 'user' })];
+    const savedUser = await this.userRepository.save(newUser);
 
-    const savedUser = await repo.save(newUser);
-
-    // Re-fetch to ensure relations are loaded for token generation
-    const finalUser = await repo.findOne({
+    const finalUser = await this.userRepository.findOne({
       where: { id: savedUser.id },
       relations: ['roles', 'roles.permissions'],
     });
 
-    return this.generateTokens(finalUser!);
+    return await this.generateTokens(finalUser!);
   }
 }
