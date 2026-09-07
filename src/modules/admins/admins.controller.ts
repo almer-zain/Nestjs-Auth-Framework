@@ -1,34 +1,35 @@
 import {
   Controller,
   Get,
-  Post,
-  Body,
   Patch,
+  Post,
   Param,
-  Delete,
+  Body,
+  Query,
+  ParseIntPipe,
+  UseGuards,
   UseInterceptors,
   ClassSerializerInterceptor,
-  ParseIntPipe,
-  Query,
-  UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
-  ApiOkResponse,
   ApiBearerAuth,
+  ApiResponse,
+  ApiBadRequestResponse,
+  ApiNotFoundResponse,
 } from '@nestjs/swagger';
 import { AdminsService } from './admins.service';
-import { CreateAdminDto } from './dto/create-admin.dto';
-import { UpdateAdminDto } from './dto/update-admin.dto';
+import { BanUserDto } from './dto/ban-user.dto';
+import { AssignRolesDto } from './dto/assign-roles.dto';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { PermissionsGuard } from '../permissions/guards/permissions.guard';
-import { CurrentUser } from 'src/common/decorator/current-user.decorator';
-import type { JwtPayload } from 'src/common/types/jwt-types';
 import { RequirePermissions } from '../permissions/decorators/permissions.decorator';
 
-@ApiTags('Admins')
+@ApiTags('Admin Operations')
 @ApiBearerAuth()
 @Controller('admins')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -36,53 +37,59 @@ import { RequirePermissions } from '../permissions/decorators/permissions.decora
 export class AdminsController {
   constructor(private readonly adminsService: AdminsService) {}
 
-  @Get()
-  @RequirePermissions('admins.read')
-  @ApiOperation({ summary: 'Retrieve paginated list of administrators' })
-  @ApiOkResponse({
-    description: 'Returns a paginated list of admins and metadata',
+  @Get('users')
+  @RequirePermissions('users.read', 'admins.manage')
+  @ApiOperation({ summary: 'Admin search and overview of all user accounts' })
+  @ApiResponse({ status: 200, description: 'Paginated user moderation list' })
+  listUsers(
+    @Query()
+    query: PaginationQueryDto & { search?: string; isBanned?: boolean },
+  ) {
+    return this.adminsService.listUsers(query);
+  }
+
+  @Patch('users/:id/ban')
+  @RequirePermissions('users.ban')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Ban a user and revoke all active sessions' })
+  @ApiResponse({ status: 200, description: 'User has been banned' })
+  @ApiBadRequestResponse({ description: 'User is already banned' })
+  @ApiNotFoundResponse({ description: 'User not found' })
+  banUser(@Param('id', ParseIntPipe) id: number, @Body() dto: BanUserDto) {
+    return this.adminsService.banUser(id, dto);
+  }
+
+  @Patch('users/:id/unban')
+  @RequirePermissions('users.ban')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Unban a user account' })
+  @ApiResponse({ status: 200, description: 'User unbanned successfully' })
+  @ApiBadRequestResponse({ description: 'User is not banned' })
+  unbanUser(@Param('id', ParseIntPipe) id: number) {
+    return this.adminsService.unbanUser(id);
+  }
+
+  @Patch('users/:id/roles')
+  @RequirePermissions('roles.assign', 'admins.manage')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Assign or modify security roles for a user' })
+  @ApiResponse({
+    status: 200,
+    description: 'Roles updated and refresh tokens invalidated',
   })
-  findAll(@Query() query: PaginationQueryDto) {
-    return this.adminsService.findAll(query);
-  }
-
-  @Get(':id')
-  @ApiOperation({ summary: 'Fetch administrator by unique ID' })
-  findOne(
+  assignRoles(
     @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() currentUser: JwtPayload,
+    @Body() dto: AssignRolesDto,
   ) {
-    return this.adminsService.findOne(id, currentUser);
+    return this.adminsService.assignRoles(id, dto);
   }
 
-  @Post()
-  @RequirePermissions('admins.create')
-  @ApiOperation({ summary: 'Register a new administrative account' })
-  create(@Body() createAdminDto: CreateAdminDto) {
-    return this.adminsService.create(createAdminDto);
-  }
-
-  @Patch(':id')
-  @ApiOperation({ summary: 'Update administrator details or roles' })
-  update(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() updateAdminDto: UpdateAdminDto,
-    @CurrentUser() currentUser: JwtPayload,
-  ) {
-    return this.adminsService.update(id, updateAdminDto, currentUser);
-  }
-
-  @Delete(':id')
-  @RequirePermissions('admins.delete')
-  @ApiOperation({ summary: 'Scrub and soft-delete administrator' })
-  remove(@Param('id', ParseIntPipe) id: number) {
-    return this.adminsService.remove(id);
-  }
-
-  @Patch(':id/restore')
-  @RequirePermissions('admins.restore')
-  @ApiOperation({ summary: 'Restore soft-deleted administrator' })
-  restore(@Param('id', ParseIntPipe) id: number) {
-    return this.adminsService.restore(id);
+  @Post('users/:id/force-logout')
+  @RequirePermissions('users.manage')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Invalidate all active sessions for a user' })
+  @ApiResponse({ status: 200, description: 'User forcefully logged out' })
+  forceLogout(@Param('id', ParseIntPipe) id: number) {
+    return this.adminsService.forceLogout(id);
   }
 }

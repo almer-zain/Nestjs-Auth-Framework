@@ -89,7 +89,11 @@ import { AuthModule } from './modules/auth/auth.module';
 
         // Captcha
         CAPTCHA_ENABLED: Joi.boolean().default(false),
-        CAPTCHA_SECRET: Joi.string().required(),
+        CAPTCHA_SECRET: Joi.string().when('CAPTCHA_ENABLED', {
+          is: true,
+          then: Joi.required(),
+          otherwise: Joi.optional().allow(''),
+        }),
       }),
     }),
 
