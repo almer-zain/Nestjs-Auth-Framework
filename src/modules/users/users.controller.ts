@@ -26,7 +26,7 @@ import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { PermissionsGuard } from '../permissions/guards/permissions.guard';
 import { PaginationQueryDto } from 'src/common/dto/pagination.dto';
 import type { JwtPayload } from 'src/common/types/jwt-types';
-import { CurrentUser } from 'src/common/decorator/current-user.decorator';
+import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { RequirePermissions } from '../permissions/decorators/permissions.decorator';
 
 @ApiTags('Users')

@@ -5,10 +5,15 @@ import { Injectable, Inject, UnauthorizedException } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import jwtConfig from '../namespaces/jwt.config';
 import { JwtPayload } from 'src/common/types/jwt-types';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 
 @Injectable()
 export class JwtAccessStrategy extends PassportStrategy(Strategy, 'jwt') {
-  constructor(@Inject(jwtConfig.KEY) jwtConf: ConfigType<typeof jwtConfig>) {
+  constructor(
+    @Inject(jwtConfig.KEY) jwtConf: ConfigType<typeof jwtConfig>,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+  ) {
     const jwtOptions: StrategyOptions & { clockTolerance: number } = {
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
@@ -18,15 +23,24 @@ export class JwtAccessStrategy extends PassportStrategy(Strategy, 'jwt') {
     super(jwtOptions);
   }
 
-  validate(payload: JwtPayload) {
+  async validate(payload: JwtPayload) {
     if (!payload?.sub) {
       throw new UnauthorizedException('Invalid token payload');
+    }
+
+    const isBanned = (await this.cacheManager.get<boolean>(
+      `banned_user:${payload.sub}`,
+    )) as boolean;
+
+    if (isBanned) {
+      throw new UnauthorizedException(
+        'Your account has been suspended by an administrator.',
+      );
     }
 
     return {
       userId: payload.sub,
       email: payload.email,
-      type: payload.type,
       roles: payload.roles ?? [],
       permissions: payload.permissions || [],
     };
