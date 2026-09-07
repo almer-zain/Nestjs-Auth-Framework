@@ -12,10 +12,6 @@ import {
 import { Exclude } from 'class-transformer';
 import { Role } from 'src/modules/roles/entities/role.entity';
 
-/**
- * Abstract base class for identity-based accounts.
- * Provides core authentication fields, 2FA support, token tracking, and lifecycle hooks.
- */
 export abstract class BaseAccount {
   @PrimaryGeneratedColumn()
   id: number;
@@ -33,10 +29,18 @@ export abstract class BaseAccount {
   @Exclude()
   password: string;
 
-  // --- Session & Refresh Token Invalidation ---
-  @Column({ type: 'varchar', nullable: true, select: false })
-  @Exclude()
-  refreshTokenHash: string | null;
+  // --- Moderation ---
+  @Column({ type: 'boolean', default: false })
+  isBanned: boolean;
+
+  @Column({ type: 'varchar', nullable: true })
+  banReason: string | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  bannedAt: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  bannedUntil: Date | null;
 
   // --- Multi-Factor Authentication ---
   @Column({ type: 'boolean', default: false })
@@ -45,6 +49,10 @@ export abstract class BaseAccount {
   @Column({ type: 'varchar', nullable: true, select: false })
   @Exclude()
   twoFactorSecret: string | null;
+
+  @Column({ type: 'simple-array', nullable: true, select: false })
+  @Exclude()
+  twoFactorRecoveryCodes: string[] | null;
 
   // --- Password Recovery ---
   @Column({ type: 'varchar', nullable: true, select: false })
@@ -60,7 +68,7 @@ export abstract class BaseAccount {
   @JoinTable()
   roles: Role[];
 
-  // --- Audit Timestamps ---
+  // --- Timestamps ---
   @CreateDateColumn({ type: 'timestamp' })
   createdAt: Date;
 
@@ -71,35 +79,11 @@ export abstract class BaseAccount {
   @Exclude()
   deletedAt: Date | null;
 
-  // --- Ban ---
-  @Column({ type: 'boolean', default: false })
-  isBanned: boolean;
-
-  @Column({ type: 'varchar', nullable: true })
-  banReason: string | null;
-
-  @Column({ type: 'timestamp', nullable: true })
-  bannedAt: Date | null;
-
-  @Column({ type: 'timestamp', nullable: true })
-  bannedUntil: Date | null; // Null means permanent ban
-
-  /**
-   * Lifecycle hook to normalize data before database persistence.
-   */
   @BeforeInsert()
   @BeforeUpdate()
   protected sanitizeAccountData(): void {
-    if (this.email) {
-      this.email = this.email.toLowerCase().trim();
-    }
-
-    if (this.username) {
-      this.username = this.username.toLowerCase().trim();
-    }
-
-    if (this.displayName) {
-      this.displayName = this.displayName.trim();
-    }
+    if (this.email) this.email = this.email.toLowerCase().trim();
+    if (this.username) this.username = this.username.toLowerCase().trim();
+    if (this.displayName) this.displayName = this.displayName.trim();
   }
 }

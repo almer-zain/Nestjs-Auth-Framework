@@ -9,10 +9,11 @@ import { MailerModule } from '@nestjs-modules/mailer';
 import { CaptchaService } from './captcha.service';
 import { DeviceService } from './device.service';
 import { MailService } from '../mail/mail.service';
+import { UserSession } from './entities/user-session.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([AccountDevice, User]),
+    TypeOrmModule.forFeature([AccountDevice, User, UserSession]),
     JwtModule.register({}),
     MailerModule,
   ],

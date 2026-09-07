@@ -11,11 +11,11 @@ export class Verify2FADto {
   mfaTicket: string;
 
   @ApiProperty({
-    description: '6-digit OTP from authenticator app',
+    description: '6-digit OTP OR 9-character recovery code (e.g., A1B2-C3D4)',
     example: '123456',
   })
   @IsString()
   @IsNotEmpty()
-  @Length(6, 6, { message: '2FA code must be exactly 6 digits' })
+  @Length(6, 12, { message: 'Must be a 6-digit OTP or a valid backup code' })
   token: string;
 }

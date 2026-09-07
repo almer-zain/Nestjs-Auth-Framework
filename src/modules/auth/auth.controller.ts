@@ -17,8 +17,9 @@ import {
   ApiBearerAuth,
   ApiUnauthorizedResponse,
   ApiBadRequestResponse,
+  ApiNotFoundResponse,
 } from '@nestjs/swagger';
-import { AuthService } from './auth.service';
+import { AuthService, AuthTokens, LoginResult } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -27,64 +28,77 @@ import { Enable2FADto } from './dto/enable-2fa.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { JwtAuthGuard } from './guard/jwt-auth.guard';
-import { CurrentUser } from 'src/common/decorator/current-user.decorator';
+import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+import { User } from '../users/entities/user.entity';
 
-@ApiTags('Authentication')
+@ApiTags('Authentication & Identity')
 @Controller('auth')
 @UseInterceptors(ClassSerializerInterceptor)
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  /**
+   * Registers a new account with Argon2id password hashing and optional Turnstile CAPTCHA.
+   */
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Register new account',
+    summary: 'Register a new user account',
     description:
-      'Creates a new user account with hashed credentials and optional Turnstile CAPTCHA validation.',
+      'Provisions a standard account, verifies the Cloudflare Turnstile token (if enabled), and hashes credentials using Argon2id.',
   })
-  @ApiResponse({ status: 201, description: 'User successfully registered' })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: 'User successfully registered.',
+    type: User,
+  })
   @ApiBadRequestResponse({
-    description: 'Validation failed or email/username already taken',
+    description:
+      'Validation failed, CAPTCHA invalid, or email/username already exists.',
   })
-  register(@Body() data: RegisterDto) {
-    return this.authService.register(data);
+  async register(@Body() data: RegisterDto): Promise<User> {
+    return await this.authService.register(data);
   }
 
+  /**
+   * Authenticates user credentials and checks for active 2FA or account suspension.
+   */
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Authenticate account',
+    summary: 'Authenticate credentials',
     description:
-      'Validates credentials. Returns standard tokens OR an `mfaTicket` if 2FA is active on the account.',
+      'Validates credentials and analyzes device fingerprint. Returns standard Access/Refresh tokens OR an `mfaTicket` if 2FA is active.',
   })
   @ApiResponse({
-    status: 200,
+    status: HttpStatus.OK,
     description:
-      'Returns access & refresh tokens OR indicates 2FA requirement with an mfaTicket',
+      'Authentication successful. Returns token pair or an MFA challenge ticket.',
     schema: {
       oneOf: [
         {
-          example: {
-            accessToken: 'eyJhbGciOi...',
-            refreshToken: 'eyJhbGciOi...',
+          properties: {
+            accessToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+            refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
           },
         },
         {
-          example: {
-            mfaRequired: true,
-            mfaTicket: 'eyJhbGciOi...',
+          properties: {
+            mfaRequired: { type: 'boolean', example: true },
+            mfaTicket: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
           },
         },
       ],
     },
   })
-  @ApiUnauthorizedResponse({ description: 'Invalid email or password' })
+  @ApiUnauthorizedResponse({
+    description: 'Invalid credentials, CAPTCHA failure, or account suspended.',
+  })
   async login(
     @Body() data: LoginDto,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,
-  ) {
-    // Passes ip and ua to satisfy ESLint and enable DeviceService tracking
+  ): Promise<LoginResult> {
     return await this.authService.login({
       ...data,
       ip,
@@ -92,46 +106,78 @@ export class AuthController {
     });
   }
 
+  /**
+   * Rotates access and refresh tokens for a specific device session.
+   */
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Rotate refresh token',
+    summary: 'Rotate session tokens',
     description:
-      'Issues a new Access & Refresh token pair while invalidating the old refresh token.',
+      'Exchanges a valid refresh token for a newly rotated Access & Refresh token pair. Implements automatic token theft detection.',
   })
-  @ApiResponse({ status: 200, description: 'Tokens rotated successfully' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Tokens successfully rotated.',
+    schema: {
+      properties: {
+        accessToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+        refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+      },
+    },
+  })
   @ApiUnauthorizedResponse({
-    description: 'Expired, invalid, or reused refresh token',
+    description: 'Expired, revoked, or compromised refresh token.',
   })
-  async refreshToken(@Body() data: RefreshTokenDto) {
-    return await this.authService.refreshTokens(data.refreshToken);
+  async refreshToken(
+    @Body() data: RefreshTokenDto,
+    @Ip() ip: string,
+    @Headers('user-agent') ua: string,
+  ): Promise<AuthTokens> {
+    return await this.authService.refreshTokens(data.refreshToken, ip, ua);
   }
 
+  /**
+   * Initializes TOTP-based 2FA setup by generating a secret and QR code URI.
+   */
   @Post('2fa/generate')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Initialize 2FA setup',
+    summary: 'Initialize 2FA setup (QR Code)',
     description:
-      'Generates a TOTP secret and returns a QR code data URI. User must be authenticated.',
+      'Generates a TOTP Base32 secret and returns a QR code data URI. Does NOT activate 2FA until confirmed via `/auth/2fa/enable`.',
   })
   @ApiResponse({
-    status: 200,
-    description: '2FA secret and QR code generated',
+    status: HttpStatus.OK,
+    description: '2FA secret and QR code successfully generated.',
     schema: {
-      example: {
-        secret: 'JBSWY3DPEHPK3PXP',
-        qrCode: 'data:image/png;base64,...',
-        uri: 'otpauth://totp/MyApp:user@example.com?secret=...',
+      properties: {
+        secret: { type: 'string', example: 'JBSWY3DPEHPK3PXP' },
+        qrCode: {
+          type: 'string',
+          example: 'data:image/png;base64,iVBORw0KGgo...',
+        },
+        uri: {
+          type: 'string',
+          example: 'otpauth://totp/MyApp:user@example.com?secret=...',
+        },
       },
     },
   })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid Bearer token' })
-  generate2FA(@CurrentUser('sub') userId: number) {
-    return this.authService.generate2FASecret(userId);
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid Bearer access token.',
+  })
+  async generate2FA(
+    @CurrentUser('sub') userId: number,
+  ): Promise<{ secret: string; qrCode: string; uri: string }> {
+    return await this.authService.generate2FASecret(userId);
   }
 
+  /**
+   * Confirms and activates 2FA on the account using the first valid TOTP token.
+   */
   @Post('2fa/enable')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -139,80 +185,174 @@ export class AuthController {
   @ApiOperation({
     summary: 'Confirm and activate 2FA',
     description:
-      'Verifies the first 6-digit TOTP code to permanently activate 2FA for the authenticated user.',
+      'Verifies the first 6-digit TOTP code against the generated secret to permanently enable 2FA on the account.',
   })
-  @ApiResponse({ status: 200, description: '2FA successfully activated' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Two-factor authentication successfully activated.',
+    schema: {
+      properties: {
+        message: {
+          type: 'string',
+          example: 'Two-factor authentication enabled successfully',
+        },
+      },
+    },
+  })
   @ApiBadRequestResponse({
-    description: 'Invalid verification code or setup uninitialized',
+    description: 'Invalid verification code or setup uninitialized.',
   })
-  enable2FA(@CurrentUser('sub') userId: number, @Body() data: Enable2FADto) {
-    return this.authService.enable2FA(userId, data);
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid Bearer access token.',
+  })
+  async enable2FA(
+    @CurrentUser('sub') userId: number,
+    @Body() data: Enable2FADto,
+  ): Promise<{ message: string }> {
+    return await this.authService.enable2FA(userId, data);
   }
 
+  /**
+   * Validates an MFA ticket alongside a 6-digit TOTP code to finalize login.
+   */
   @Post('2fa/verify')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Verify 2FA login challenge',
     description:
-      'Exchanges the temporary `mfaTicket` and 6-digit TOTP code for active access and refresh tokens.',
+      'Exchanges the short-lived `mfaTicket` and a 6-digit TOTP code for full Access & Refresh session tokens.',
   })
   @ApiResponse({
-    status: 200,
-    description: '2FA validated. Returns access and refresh tokens.',
+    status: HttpStatus.OK,
+    description: 'MFA challenge verified. Tokens issued.',
+    schema: {
+      properties: {
+        accessToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+        refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+      },
+    },
   })
   @ApiUnauthorizedResponse({
-    description: 'Invalid or expired MFA ticket or incorrect OTP',
+    description: 'Invalid or expired MFA ticket, or incorrect OTP code.',
   })
-  verify2FA(
+  @ApiNotFoundResponse({ description: 'User account not found.' })
+  async verify2FA(
     @Body() data: Verify2FADto,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,
-  ) {
-    return this.authService.verify2FA(data, ip, ua);
+  ): Promise<AuthTokens> {
+    return await this.authService.verify2FA(data, ip, ua);
   }
 
+  /**
+   * Generates a cryptographically secure password reset token and sends an email.
+   */
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Request password reset',
+    summary: 'Request password reset email',
     description:
-      'Sends a password recovery link with a cryptographically secure token to the registered email.',
+      'Generates a SHA-256 hashed recovery token and emails the raw token link. Always returns a 200 OK to prevent account enumeration.',
   })
   @ApiResponse({
-    status: 200,
-    description: 'Recovery email dispatched if address exists',
+    status: HttpStatus.OK,
+    description: 'Recovery email dispatched if the address exists.',
+    schema: {
+      properties: {
+        message: {
+          type: 'string',
+          example: 'If email exists, a reset code was sent',
+        },
+      },
+    },
   })
-  forgotPassword(@Body() data: ForgotPasswordDto) {
-    return this.authService.forgotPassword(data.email);
+  async forgotPassword(
+    @Body() data: ForgotPasswordDto,
+  ): Promise<{ message: string; token?: string; resetUrl?: string }> {
+    return await this.authService.forgotPassword(data.email);
   }
 
+  /**
+   * Consumes a password reset token, updates credentials, and revokes all active sessions.
+   */
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Reset password with token',
+    summary: 'Reset password using token',
     description:
-      'Validates the hashed recovery token and applies a new argon2-hashed password.',
+      'Validates the recovery token, updates the password using Argon2id, and invalidates ALL active sessions across all devices.',
   })
-  @ApiResponse({ status: 200, description: 'Password reset successfully' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Password reset successful. All active sessions invalidated.',
+    schema: {
+      properties: {
+        message: { type: 'string', example: 'Password updated successfully' },
+      },
+    },
+  })
   @ApiBadRequestResponse({
-    description: 'Invalid, malformed, or expired reset token',
+    description: 'Invalid, malformed, or expired password reset token.',
   })
-  resetPassword(@Body() data: ResetPasswordDto) {
-    return this.authService.resetPassword(data);
+  async resetPassword(
+    @Body() data: ResetPasswordDto,
+  ): Promise<{ message: string }> {
+    return await this.authService.resetPassword(data);
   }
 
+  /**
+   * Logs out the current device by deleting its specific session record.
+   */
   @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Log out current device',
+    description:
+      'Invalidates the presented refresh token by removing its device session record from the database.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Device session terminated successfully.',
+    schema: {
+      properties: {
+        message: { type: 'string', example: 'Logged out successfully' },
+      },
+    },
+  })
+  async logout(@Body() data: RefreshTokenDto): Promise<{ message: string }> {
+    return await this.authService.logoutSession(data.refreshToken);
+  }
+
+  /**
+   * Logs out all devices for the account by wiping all records from `user_sessions`.
+   */
+  @Post('logout-all')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Log out user',
+    summary: 'Log out all devices (Global Logout)',
     description:
-      'Invalidates the stored refresh token hash, blocking future token refresh cycles.',
+      'Terminates all active device sessions for the authenticated user, forcing re-authentication everywhere.',
   })
-  @ApiResponse({ status: 200, description: 'Session terminated successfully' })
-  @ApiUnauthorizedResponse({ description: 'Unauthorized' })
-  logout(@CurrentUser('sub') userId: number) {
-    return this.authService.logout(userId);
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'All user sessions terminated.',
+    schema: {
+      properties: {
+        message: {
+          type: 'string',
+          example: 'All active sessions have been terminated',
+        },
+      },
+    },
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid Bearer access token.',
+  })
+  async logoutAll(
+    @CurrentUser('sub') userId: number,
+  ): Promise<{ message: string }> {
+    return await this.authService.logoutAllSessions(userId);
   }
 }
