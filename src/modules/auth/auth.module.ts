@@ -10,6 +10,10 @@ import { CaptchaService } from './captcha.service';
 import { DeviceService } from './device.service';
 import { MailService } from '../mail/mail.service';
 import { UserSession } from './entities/user-session.entity';
+import { TwoFactorService } from './services/two-factor.service';
+import { TokenSessionService } from './services/token-session.service';
+import { PasswordResetService } from './services/password-reset.service';
+import { AuthLockoutService } from './services/auth-lockout.service';
 
 @Module({
   imports: [
@@ -18,6 +22,15 @@ import { UserSession } from './entities/user-session.entity';
     MailerModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, CaptchaService, DeviceService, MailService],
+  providers: [
+    AuthService,
+    CaptchaService,
+    DeviceService,
+    MailService,
+    TwoFactorService,
+    TokenSessionService,
+    PasswordResetService,
+    AuthLockoutService,
+  ],
 })
 export class AuthModule {}

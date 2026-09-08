@@ -19,18 +19,33 @@ import {
   ApiBadRequestResponse,
   ApiNotFoundResponse,
 } from '@nestjs/swagger';
-import { AuthService, AuthTokens, LoginResult } from './auth.service';
-import { LoginDto } from './dto/login.dto';
+
+import { AuthService } from './auth.service';
+import { User } from '../users/entities/user.entity';
+import { JwtAuthGuard } from './guard/jwt-auth.guard';
+import { CurrentUser } from 'src/common/decorators/current-user.decorator';
+
 import { RegisterDto } from './dto/register.dto';
+import { LoginDto } from './dto/login.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { Verify2FADto } from './dto/verify-2fa.dto';
 import { Enable2FADto } from './dto/enable-2fa.dto';
-import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { ForgotPasswordDto } from './dto/forgot-password.dto';
-import { JwtAuthGuard } from './guard/jwt-auth.guard';
-import { CurrentUser } from 'src/common/decorators/current-user.decorator';
-import { User } from '../users/entities/user.entity';
 
+import {
+  AuthTokens,
+  LoginResult,
+  GeneratedTwoFactorSecret,
+  EnableTwoFactorResult,
+} from './types/auth.types';
+
+/**
+ * Authentication & Identity Controller.
+ *
+ * Exposes endpoints for user registration, authentication handshakes,
+ * token rotation (RTR), two-factor authentication (TOTP), and password recovery.
+ */
 @ApiTags('Authentication & Identity')
 @Controller('auth')
 @UseInterceptors(ClassSerializerInterceptor)
@@ -38,7 +53,10 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   /**
-   * Registers a new account with Argon2id password hashing and optional Turnstile CAPTCHA.
+   * Registers a new account with Argon2id password hashing and optional CAPTCHA verification.
+   *
+   * @param data - Registration credentials and optional Turnstile token
+   * @returns Newly created and persisted User entity
    */
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
@@ -61,7 +79,12 @@ export class AuthController {
   }
 
   /**
-   * Authenticates user credentials and checks for active 2FA or account suspension.
+   * Authenticates user credentials, evaluates account status, and processes 2FA state.
+   *
+   * @param data - Login credentials
+   * @param ip - Client IP address
+   * @param ua - Client User-Agent string
+   * @returns Access/Refresh tokens or an intermediate MFA challenge ticket
    */
   @Post('login')
   @HttpCode(HttpStatus.OK)
@@ -107,7 +130,12 @@ export class AuthController {
   }
 
   /**
-   * Rotates access and refresh tokens for a specific device session.
+   * Rotates access and refresh tokens for a specific device session with reuse detection.
+   *
+   * @param data - Payload containing the active refresh token
+   * @param ip - Client IP address
+   * @param ua - Client User-Agent string
+   * @returns Rotated Access and Refresh token pair
    */
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
@@ -139,6 +167,9 @@ export class AuthController {
 
   /**
    * Initializes TOTP-based 2FA setup by generating a secret and QR code URI.
+   *
+   * @param userId - Target user identifier extracted from JWT payload
+   * @returns Generated Base32 secret, QR code image, and otpauth URI
    */
   @Post('2fa/generate')
   @UseGuards(JwtAuthGuard)
@@ -171,12 +202,16 @@ export class AuthController {
   })
   async generate2FA(
     @CurrentUser('sub') userId: number,
-  ): Promise<{ secret: string; qrCode: string; uri: string }> {
+  ): Promise<GeneratedTwoFactorSecret> {
     return await this.authService.generate2FASecret(userId);
   }
 
   /**
-   * Confirms and activates 2FA on the account using the first valid TOTP token.
+   * Confirms initial TOTP code, enables 2FA, and generates single-use backup recovery codes.
+   *
+   * @param userId - Target user identifier extracted from JWT payload
+   * @param data - Payload containing the 6-digit confirmation code
+   * @returns Confirmation message and list of unhashed recovery codes
    */
   @Post('2fa/enable')
   @UseGuards(JwtAuthGuard)
@@ -196,6 +231,11 @@ export class AuthController {
           type: 'string',
           example: 'Two-factor authentication enabled successfully',
         },
+        recoveryCodes: {
+          type: 'array',
+          items: { type: 'string' },
+          example: ['A1B2-C3D4', 'E5F6-G7H8'],
+        },
       },
     },
   })
@@ -208,12 +248,17 @@ export class AuthController {
   async enable2FA(
     @CurrentUser('sub') userId: number,
     @Body() data: Enable2FADto,
-  ): Promise<{ message: string }> {
+  ): Promise<EnableTwoFactorResult> {
     return await this.authService.enable2FA(userId, data);
   }
 
   /**
-   * Validates an MFA ticket alongside a 6-digit TOTP code to finalize login.
+   * Validates an MFA challenge ticket alongside a 6-digit TOTP code or recovery code.
+   *
+   * @param data - MFA challenge payload containing ticket and token
+   * @param ip - Client IP address
+   * @param ua - Client User-Agent string
+   * @returns Full Access & Refresh session token pair
    */
   @Post('2fa/verify')
   @HttpCode(HttpStatus.OK)
@@ -245,7 +290,10 @@ export class AuthController {
   }
 
   /**
-   * Generates a cryptographically secure password reset token and sends an email.
+   * Generates a single-use password recovery token and dispatches a reset link via email.
+   *
+   * @param data - Payload containing the target account email
+   * @returns Generic confirmation message to prevent user enumeration
    */
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
@@ -273,7 +321,10 @@ export class AuthController {
   }
 
   /**
-   * Consumes a password reset token, updates credentials, and revokes all active sessions.
+   * Consumes a valid password reset token, updates password, and purges all active sessions.
+   *
+   * @param data - Recovery payload containing email, token, and new password
+   * @returns Password reset confirmation message
    */
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
@@ -301,7 +352,10 @@ export class AuthController {
   }
 
   /**
-   * Logs out the current device by deleting its specific session record.
+   * Logs out the current device by revoking and deleting its specific session record.
+   *
+   * @param data - Payload containing the current active refresh token
+   * @returns Logout confirmation message
    */
   @Post('logout')
   @HttpCode(HttpStatus.OK)
@@ -324,7 +378,10 @@ export class AuthController {
   }
 
   /**
-   * Logs out all devices for the account by wiping all records from `user_sessions`.
+   * Terminates all active sessions for the user across all devices (Emergency Logout).
+   *
+   * @param userId - Target user identifier extracted from JWT payload
+   * @returns Global purge confirmation message
    */
   @Post('logout-all')
   @UseGuards(JwtAuthGuard)
