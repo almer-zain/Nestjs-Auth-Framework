@@ -68,6 +68,18 @@ export abstract class BaseAccount {
   @JoinTable()
   roles: Role[];
 
+  // --- Email Verification ---
+  @Column({ type: 'boolean', default: false })
+  isEmailVerified: boolean;
+
+  @Column({ type: 'varchar', nullable: true, select: false })
+  @Exclude()
+  emailVerificationToken: string | null;
+
+  @Column({ type: 'timestamp', nullable: true, select: false })
+  @Exclude()
+  emailVerificationExpires: Date | null;
+
   // --- Timestamps ---
   @CreateDateColumn({ type: 'timestamp' })
   createdAt: Date;
