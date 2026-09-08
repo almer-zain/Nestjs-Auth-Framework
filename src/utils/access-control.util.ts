@@ -3,33 +3,29 @@ import { JwtPayload } from 'src/common/types/jwt-types';
 
 export class AccessControlUtil {
   /**
-   * Checks if the user is a SuperAdmin (or has wildcard '*' permissions).
+   * Checks if the user is a SuperAdmin, Admin, or has wildcard '*' permissions.
    */
   static isAdmin(user: JwtPayload): boolean {
     if (!user) return false;
 
-    return Boolean(
-      user.roles?.includes('SuperAdmin') || user.permissions?.includes('*'),
+    const hasAdminRole = user.roles?.some((role) =>
+      ['SuperAdmin', 'Admin'].includes(role),
     );
+    const hasWildcardPermission = user.permissions?.includes('*');
+
+    return Boolean(hasAdminRole || hasWildcardPermission);
   }
 
   /**
    * Checks if the current user is the owner of a given resource.
-   * Resolves ID across standard sub, id, and userId payload formats.
    */
   static isOwner(user: JwtPayload, resourceOwnerId: number): boolean {
-    if (!user) return false;
-
-    const userRecord = user as unknown as Record<string, unknown>;
-    const userId = user.sub ?? userRecord.id ?? userRecord.userId;
-
-    if (userId === undefined || userId === null) return false;
-
-    return Number(userId) === Number(resourceOwnerId);
+    if (!user || user.sub === undefined || user.sub === null) return false;
+    return Number(user.sub) === Number(resourceOwnerId);
   }
 
   /**
-   * Passes if the user is a SuperAdmin OR if the user owns the resource.
+   * Passes if the user has Admin rights OR owns the resource.
    * Throws ForbiddenException otherwise.
    */
   static checkAdminOrOwner(
@@ -41,11 +37,7 @@ export class AccessControlUtil {
       throw new ForbiddenException('User context not found');
     }
 
-    if (this.isAdmin(user)) {
-      return;
-    }
-
-    if (this.isOwner(user, resourceOwnerId)) {
+    if (this.isAdmin(user) || this.isOwner(user, resourceOwnerId)) {
       return;
     }
 

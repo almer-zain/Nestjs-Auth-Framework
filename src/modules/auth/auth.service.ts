@@ -1,374 +1,389 @@
-import {
-  Injectable,
-  UnauthorizedException,
-  BadRequestException,
-  Inject,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
-import { JwtService, JwtSignOptions } from '@nestjs/jwt';
-import { generateSecret, generateURI, verify } from 'otplib';
-import * as QRCode from 'qrcode';
-import { ConfigService, type ConfigType } from '@nestjs/config';
 
 import { User } from '../users/entities/user.entity';
-import { Admin } from '../admins/entities/admin.entity';
-import { MailService } from '../mail/mail.service';
+import { UserSession } from './entities/user-session.entity';
 import { CaptchaService } from './captcha.service';
 import { DeviceService } from './device.service';
-import jwtConfig from 'src/config/namespaces/jwt.config';
+import { AuthLockoutService } from './services/auth-lockout.service';
+import { TokenSessionService } from './services/token-session.service';
+import { TwoFactorService } from './services/two-factor.service';
+import { PasswordResetService } from './services/password-reset.service';
+import { AuthCryptoUtil } from './utils/auth-crypto.util';
+import { getErrorStack } from 'src/utils/error.util';
 
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
-import { AccountWithRoles } from '../roles/entities/role.entity';
-import { getErrorStack } from 'src/utils/error.util';
 import { Verify2FADto } from './dto/verify-2fa.dto';
+import { Enable2FADto } from './dto/enable-2fa.dto';
+import {
+  LoginResult,
+  AuthTokens,
+  GeneratedTwoFactorSecret,
+  EnableTwoFactorResult,
+} from './types/auth.types';
 
+/**
+ * Core Authentication Orchestrator.
+ *
+ * Serves as the primary entry point and facade for identity registration,
+ * credential verification, OAuth provisioning, and delegates specialized workflows
+ * (lockout, sessions, 2FA, password recovery) to dedicated domain services.
+ */
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
-    @InjectRepository(User) private readonly userRepository: Repository<User>,
-    @InjectRepository(Admin)
-    private readonly adminRepository: Repository<Admin>,
-    private readonly jwtService: JwtService,
-    private readonly mailService: MailService,
-    private readonly configService: ConfigService,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
     private readonly captchaService: CaptchaService,
     private readonly deviceService: DeviceService,
-    @Inject(jwtConfig.KEY)
-    private readonly jwtConf: ConfigType<typeof jwtConfig>,
+    private readonly lockoutService: AuthLockoutService,
+    private readonly tokenSessionService: TokenSessionService,
+    private readonly twoFactorService: TwoFactorService,
+    private readonly passwordResetService: PasswordResetService,
   ) {}
 
-  /**
-   * Internal helper to resolve the appropriate repository based on account type.
-   */
-  private getRepo(type: 'user' | 'admin') {
-    return type === 'admin' ? this.adminRepository : this.userRepository;
-  }
+  // ===========================================================================
+  // CORE AUTHENTICATION WORKFLOWS
+  // ===========================================================================
 
   /**
-   * Registers a new account and hashes credentials.
+   * Provisions a standard user account with Argon2id credential hashing.
    *
-   * @param data - Registration payload
-   * @param accountType - Target entity table
-   * @returns - User data and metadata
+   * @param data - User registration payload with credentials and CAPTCHA token
+   * @returns Newly persisted User entity
    */
-  async register(data: RegisterDto, accountType: 'user' | 'admin' = 'user') {
+  async register(data: RegisterDto): Promise<User> {
     await this.captchaService.verify(data.captchaToken);
-    const repo = this.getRepo(accountType);
 
-    const hashedPassword = await bcrypt.hash(data.password, 10);
-    const dataObj = data as unknown as Record<string, unknown>;
-    const displayName =
-      (typeof dataObj.displayName === 'string' && dataObj.displayName) ||
-      (typeof dataObj.usernameDisplay === 'string' &&
-        dataObj.usernameDisplay) ||
-      data.username;
+    const hashedPassword = await AuthCryptoUtil.hashPassword(data.password);
 
-    const account = repo.create({
+    const account = this.userRepository.create({
       ...data,
-      displayName,
       password: hashedPassword,
     });
 
-    return repo.save(account);
+    return await this.userRepository.save(account);
   }
 
   /**
-   * Authenticates credentials and evaluates MFA/Security requirements.
+   * Authenticates user credentials, enforces suspension checks, and evaluates MFA state.
    *
-   * @param data - Login credentials and metadata
-   * @param accountType - Entity discriminator
-   * @returns Tokens or MFA requirement state
-   * @throws {UnauthorizedException} If the credentials is invalid
+   * @param data - Login payload containing email, password, IP, and User-Agent
+   * @returns Active token pair or an intermediate MFA challenge ticket
+   * @throws UnauthorizedException - If credentials are invalid or account is suspended
+   * @throws HttpException - If account is temporarily locked out (HTTP 429)
    */
-  async login(data: LoginDto, accountType: 'user' | 'admin' = 'user') {
+  async login(data: LoginDto): Promise<LoginResult> {
+    await this.lockoutService.checkLockoutThreshold(data.email);
     await this.captchaService.verify(data.captchaToken, data.ip);
-    const repo = this.getRepo(accountType);
 
-    const account = await repo.findOne({
+    const account = await this.userRepository.findOne({
       where: { email: data.email },
-      select: ['id', 'email', 'password', 'isTwoFactorEnabled'],
+      select: [
+        'id',
+        'email',
+        'password',
+        'isTwoFactorEnabled',
+        'isBanned',
+        'banReason',
+      ],
       relations: ['roles', 'roles.permissions'],
-    });
-
-    if (!account || !(await bcrypt.compare(data.password, account.password))) {
-      this.logger.warn(`Auth Failure: Invalid attempt for ${data.email}`);
-      throw new UnauthorizedException('Invalid credentials');
-    }
-
-    if (account.isTwoFactorEnabled) {
-      return { mfaRequired: true, userId: account.id, accountType };
-    }
-
-    // Background security check
-    this.deviceService
-      .checkAndAlert(
-        account.id,
-        accountType,
-        account.email,
-        data.ip,
-        data.userAgent,
-      )
-      .catch((err) =>
-        this.logger.error(
-          `Device check failed for ${account.email}`,
-          getErrorStack(err),
-        ),
-      );
-
-    this.logger.log(`Auth Success: ${account.email} logged in`);
-    return await this.generateTokens(account);
-  }
-
-  /**
-   * Initializes TOTP-based 2FA for an account.
-   *
-   * @param userId - Target User Id
-   * @param accountType - Entity discriminator
-   * @returns Secret code, QR code, and URL
-   * @throws {BadRequestException} if account is not found
-   */
-  async generate2FASecret(
-    userId: number,
-    accountType: 'user' | 'admin' = 'user',
-  ) {
-    const repo = this.getRepo(accountType);
-    const account = await repo.findOneBy({ id: userId });
-
-    if (!account) throw new BadRequestException('Account not found');
-
-    const secret = generateSecret();
-    const uri = generateURI({
-      issuer: 'AuthService',
-      label: account.email,
-      secret,
-    });
-    const qrCode = await QRCode.toDataURL(uri);
-
-    await repo.update(userId, { twoFactorSecret: secret });
-
-    return { secret, qrCode, uri };
-  }
-
-  /**
-   * Validates a 2FA token and completes the authentication handshake.
-   *
-   * @param data - 2 Factor Authentications Data
-   * @param ip - IP of the device
-   * @param userAgent - IP of the device
-   * @returns Generated secret code, QR code, and URL
-   * @throws {BadRequestException} If account is not found
-   * @throws {UnauthorizedException} If 2 factor authentication hasn't been initialized
-   * @throws {UnauthorizedException} If 2 factor authentication token is invalid
-   */
-  async verify2FA(data: Verify2FADto, ip: string, userAgent: string) {
-    const { userId, token, accountType = 'user' } = data;
-    const repo = this.getRepo(accountType);
-
-    const account = await repo.findOne({
-      where: { id: userId },
-      relations: ['roles', 'roles.permissions'],
-    });
-
-    if (!account) {
-      throw new NotFoundException(`Account with ID ${userId} not found`);
-    }
-
-    if (!account?.twoFactorSecret)
-      throw new UnauthorizedException('2FA not initialized');
-
-    const isValid = await verify({ secret: account.twoFactorSecret, token });
-    if (!isValid) {
-      this.logger.warn(`MFA Failure: Invalid token for ID ${userId}`);
-      throw new UnauthorizedException('Invalid 2FA token');
-    }
-
-    await repo.update(userId, { isTwoFactorEnabled: true });
-
-    this.deviceService
-      .checkAndAlert(account.id, accountType, account.email, ip, userAgent)
-      .catch((err) =>
-        this.logger.error(`Device check failed`, getErrorStack(err)),
-      );
-
-    return await this.generateTokens(account);
-  }
-
-  /**
-   * Generates a unique password reset link and short-code.
-   *
-   * @param email - Target email
-   * @param accountType - Entity discriminator
-   */
-  async forgotPassword(email: string, accountType: 'user' | 'admin' = 'user') {
-    const repo = this.getRepo(accountType);
-    const account = await repo.findOneBy({ email });
-
-    if (!account) return { message: 'If email exists, code sent' };
-
-    const token = crypto.randomBytes(32).toString('hex');
-    const shortCode = token.substring(0, 6).toUpperCase();
-    const expiryMs =
-      Number(this.configService.get<number>('EXPIRY_EMAIL')) || 15 * 60 * 1000;
-    const expires = new Date(Date.now() + expiryMs);
-
-    await repo.update(account.id, {
-      passwordResetCode: token,
-      passwordResetExpires: expires,
-    });
-
-    const frontendUrl = this.configService.get<string>(
-      'FRONTEND_URL',
-      'http://localhost:3000',
-    );
-    const resetUrl = `${frontendUrl}/reset-password?token=${token}&email=${email}`;
-
-    await this.mailService.sendPasswordResetEmail(email, shortCode, resetUrl);
-
-    return this.configService.get('NODE_ENV') === 'development'
-      ? { message: 'Reset link generated', token, resetUrl }
-      : { message: 'Reset link sent' };
-  }
-
-  /**
-   * Finalizes credential update using a verified reset token.
-   *
-   * @param email - Target email
-   * @param accountType - Entity discriminator
-   * @throws {BadRequestException} If reset token is invalid or expired
-   */
-  async resetPassword(
-    data: ResetPasswordDto,
-    accountType: 'user' | 'admin' = 'user',
-  ) {
-    const repo = this.getRepo(accountType);
-    const account = await repo.findOneBy({
-      email: data.email,
-      passwordResetCode: data.code,
     });
 
     if (
       !account ||
-      !account.passwordResetExpires ||
-      account.passwordResetExpires < new Date()
+      !(await AuthCryptoUtil.verifyPassword(account.password, data.password))
     ) {
-      throw new BadRequestException('Invalid or expired code');
+      await this.lockoutService.registerFailedAttempt(data.email);
+      this.logger.warn(
+        `Authentication Failed: Invalid attempt for ${data.email}`,
+      );
+      throw new UnauthorizedException('Invalid email or password');
     }
 
-    const hashedPassword = await bcrypt.hash(data.newPassword, 10);
-    await repo.update(account.id, {
-      password: hashedPassword,
-      passwordResetCode: null,
-      passwordResetExpires: null,
+    if (account.isBanned) {
+      this.logger.warn(
+        `Access Denied: Banned user ${account.id} attempted authentication`,
+      );
+      throw new UnauthorizedException(
+        `Account has been suspended. Reason: ${account.banReason || 'Administrative decision'}`,
+      );
+    }
+
+    // Reset failed counter upon successful verification
+    await this.lockoutService.clearLockoutHistory(data.email);
+
+    // If 2FA is active, issue an intermediate 3-minute ticket
+    if (account.isTwoFactorEnabled) {
+      const mfaTicket = await this.twoFactorService.generateTicket(account.id);
+      return { mfaRequired: true, mfaTicket };
+    }
+
+    // Asynchronously log device fingerprint
+    this.triggerDeviceAlert(account.id, account.email, data.ip, data.userAgent);
+
+    return await this.tokenSessionService.createSessionAndGenerateTokens(
+      account,
+      data.ip,
+      data.userAgent,
+    );
+  }
+
+  /**
+   * Finalizes the MFA challenge using either a 6-digit TOTP code or backup recovery code.
+   *
+   * @param data - MFA verification payload containing intermediate ticket and token
+   * @param ip - Remote client IP address
+   * @param userAgent - Client browser/device identifier
+   * @returns Active token pair
+   * @throws UnauthorizedException - If ticket or verification code is invalid
+   */
+  async verify2FA(
+    data: Verify2FADto,
+    ip: string,
+    userAgent: string,
+  ): Promise<AuthTokens> {
+    const userId = await this.twoFactorService.verifyTicket(data.mfaTicket);
+
+    const account = await this.userRepository.findOne({
+      where: { id: userId },
+      select: [
+        'id',
+        'email',
+        'twoFactorSecret',
+        'twoFactorRecoveryCodes',
+        'isTwoFactorEnabled',
+        'isBanned',
+      ],
+      relations: ['roles', 'roles.permissions'],
     });
 
-    return { message: 'Password updated successfully' };
+    if (!account || account.isBanned || !account.isTwoFactorEnabled) {
+      throw new UnauthorizedException(
+        'MFA verification denied for this account',
+      );
+    }
+
+    await this.twoFactorService.validateCodeOrRecovery(account, data.token);
+
+    this.triggerDeviceAlert(account.id, account.email, ip, userAgent);
+
+    return await this.tokenSessionService.createSessionAndGenerateTokens(
+      account,
+      ip,
+      userAgent,
+    );
   }
 
+  // ===========================================================================
+  // TWO-FACTOR SETUP DELEGATIONS
+  // ===========================================================================
+
   /**
-   * Issues JWT Access and Refresh tokens.
-   * Flattens the existing roles/permissions structure into a unique string array.
+   * Generates a new TOTP secret and QR code URI for 2FA onboarding.
    *
-   * @param account - Entity discriminator
-   * @returns Generated access and refresh token
+   * @param userId - Target user identifier
+   * @returns Base32 secret, Base64 QR code image, and otpauth URI
    */
-  async generateTokens(account: User | Admin) {
-    const accountWithRoles = account as unknown as AccountWithRoles;
-
-    const roleNames: string[] = accountWithRoles.roles
-      ? accountWithRoles.roles.map((r) => r.name).filter(Boolean)
-      : [];
-
-    const permissions: string[] = accountWithRoles.roles
-      ? accountWithRoles.roles
-          .flatMap((r) => r.permissions ?? [])
-          .map((p) => p?.name)
-          .filter((name): name is string => !!name)
-      : [];
-
-    const payload = {
-      sub: account.id,
-      email: account.email,
-      type: account instanceof Admin ? 'admin' : 'user',
-      roles: Array.from(new Set(roleNames)),
-      permissions: Array.from(new Set(permissions)),
-    };
-
-    const accessToken = await this.jwtService.signAsync(payload, {
-      secret: this.jwtConf.accessSecret,
-      expiresIn: this.jwtConf.accessExpiry,
-    } as JwtSignOptions);
-
-    const refreshToken = await this.jwtService.signAsync({ sub: account.id }, {
-      secret: this.jwtConf.refreshSecret,
-      expiresIn: this.jwtConf.refreshExpiry,
-    } as JwtSignOptions);
-
-    return { accessToken, refreshToken };
+  async generate2FASecret(userId: number): Promise<GeneratedTwoFactorSecret> {
+    return await this.twoFactorService.generateSecret(userId);
   }
 
   /**
-   * Validates or provisions a user arriving via OAuth.
+   * Confirms initial TOTP code, activates 2FA, and generates recovery backup codes.
    *
-   * @param email - Entity discriminator
-   * @param firstName - Entity discriminator
-   * @param lastName - Entity discriminator
-   * @returns - Final user tokens
+   * @param userId - Target user identifier
+   * @param data - Payload containing the 6-digit activation code
+   * @returns Confirmation message and unhashed recovery codes
+   */
+  async enable2FA(
+    userId: number,
+    data: Enable2FADto,
+  ): Promise<EnableTwoFactorResult> {
+    return await this.twoFactorService.enable(userId, data.token);
+  }
+
+  // ===========================================================================
+  // SESSION & TOKEN ROTATION DELEGATIONS
+  // ===========================================================================
+
+  /**
+   * Validates refresh token and performs Refresh Token Rotation (RTR) with theft detection.
+   *
+   * @param refreshToken - Raw incoming JWT refresh token
+   * @param ip - Remote client IP address
+   * @param userAgent - Client browser/device identifier
+   * @returns Rotated token pair
+   */
+  async refreshTokens(
+    refreshToken: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<AuthTokens> {
+    return await this.tokenSessionService.refreshTokens(
+      refreshToken,
+      ip,
+      userAgent,
+    );
+  }
+
+  /**
+   * Lists all active device sessions for a user.
+   *
+   * @param userId - Target user identifier
+   * @returns Array of active session records
+   */
+  async listUserSessions(userId: number): Promise<UserSession[]> {
+    return await this.tokenSessionService.listUserSessions(userId);
+  }
+
+  /**
+   * Remotely revokes a specific device session.
+   *
+   * @param userId - Target user identifier
+   * @param sessionId - Unique session ID to revoke
+   * @returns Confirmation message
+   */
+  async revokeSession(
+    userId: number,
+    sessionId: string,
+  ): Promise<{ message: string }> {
+    await this.tokenSessionService.revokeSession(userId, sessionId);
+    return { message: 'Session successfully revoked' };
+  }
+
+  /**
+   * Terminates the current device session.
+   *
+   * @param refreshToken - Raw JWT refresh token presented by the active client
+   * @returns Logout confirmation message
+   */
+  async logoutSession(refreshToken: string): Promise<{ message: string }> {
+    await this.tokenSessionService.logoutSession(refreshToken);
+    return { message: 'Logged out successfully' };
+  }
+
+  /**
+   * Globally terminates all active sessions for a user.
+   *
+   * @param userId - Target user identifier
+   * @returns Confirmation message
+   */
+  async logoutAllSessions(userId: number): Promise<{ message: string }> {
+    await this.tokenSessionService.logoutAllSessions(userId);
+    return { message: 'All active sessions have been terminated' };
+  }
+
+  // ===========================================================================
+  // PASSWORD RECOVERY DELEGATIONS
+  // ===========================================================================
+
+  /**
+   * Generates and dispatches a single-use password recovery email.
+   *
+   * @param email - Target user email address
+   * @returns Confirmation payload
+   */
+  async forgotPassword(
+    email: string,
+  ): Promise<{ message: string; token?: string; resetUrl?: string }> {
+    return await this.passwordResetService.forgotPassword(email);
+  }
+
+  /**
+   * Verifies reset token, updates password hash, and purges all active sessions.
+   *
+   * @param data - Recovery payload containing email, token, and new password
+   * @returns Confirmation message
+   */
+  async resetPassword(data: ResetPasswordDto): Promise<{ message: string }> {
+    return await this.passwordResetService.resetPassword(data);
+  }
+
+  // ===========================================================================
+  // OAUTH 2.0 WORKFLOW
+  // ===========================================================================
+
+  /**
+   * Validates or provisions a user authenticating via OAuth 2.0.
+   *
+   * @param profile - Normalized OAuth profile payload
+   * @returns Issued token pair for the established session
    */
   async validateOAuthUser(profile: {
-    email: string;
-    firstName: string;
-    lastName: string;
-  }) {
+    readonly email: string;
+    readonly firstName: string;
+    readonly lastName: string;
+  }): Promise<AuthTokens> {
     const { email, firstName, lastName } = profile;
-    const repo = this.userRepository; // OAuth usually targets standard users
 
-    // 1. Check for existing user
-    const user = await repo.findOne({
+    let user = await this.userRepository.findOne({
       where: { email },
       relations: ['roles', 'roles.permissions'],
     });
 
     if (user) {
-      this.logger.log(`OAuth Login: ${email} authenticated via Google`);
-      return this.generateTokens(user);
+      this.logger.log(
+        `OAuth Authentication: User ${email} authenticated successfully`,
+      );
+      return await this.tokenSessionService.createSessionAndGenerateTokens(
+        user,
+      );
     }
 
-    // 2. Provision new user if not found
     this.logger.log(`OAuth Provisioning: Creating new account for ${email}`);
 
-    // Generate unusable password for security
-    const placeholderPassword = await bcrypt.hash(
+    const placeholderPassword = await AuthCryptoUtil.hashPassword(
       crypto.randomBytes(64).toString('hex'),
-      10,
     );
 
-    const newUser = repo.create({
+    const newUser = this.userRepository.create({
       email,
       username: email.split('@')[0] + crypto.randomInt(1000, 9999),
       displayName: `${firstName} ${lastName}`.trim() || email.split('@')[0],
       password: placeholderPassword,
     });
 
-    // Optional: Assign a default 'user' role here if your Role system is ready
-    // newUser.roles = [await this.roleRepo.findOneBy({ name: 'user' })];
+    user = await this.userRepository.save(newUser);
 
-    const savedUser = await repo.save(newUser);
-
-    // Re-fetch to ensure relations are loaded for token generation
-    const finalUser = await repo.findOne({
-      where: { id: savedUser.id },
+    const finalUser = await this.userRepository.findOne({
+      where: { id: user.id },
       relations: ['roles', 'roles.permissions'],
     });
 
-    return this.generateTokens(finalUser!);
+    return await this.tokenSessionService.createSessionAndGenerateTokens(
+      finalUser!,
+    );
+  }
+
+  // ===========================================================================
+  // INTERNAL HELPERS
+  // ===========================================================================
+
+  /**
+   * Asynchronously evaluates device fingerprints and dispatches security alerts if unknown.
+   *
+   * @internal
+   */
+  private triggerDeviceAlert(
+    userId: number,
+    email: string,
+    ip?: string,
+    userAgent?: string,
+  ): void {
+    this.deviceService
+      .checkAndAlert(userId, 'user', email, ip, userAgent)
+      .catch((err: unknown) =>
+        this.logger.error(
+          `Device check failed for user ${userId}`,
+          getErrorStack(err),
+        ),
+      );
   }
 }

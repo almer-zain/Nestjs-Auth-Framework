@@ -3,7 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule, TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { CacheModule } from '@nestjs/cache-manager';
 import { MailerModule } from '@nestjs-modules/mailer';
 import { GracefulShutdownModule } from 'nestjs-graceful-shutdown';
@@ -28,6 +28,10 @@ import { RolesModule } from './modules/roles/roles.module';
 import { PermissionsModule } from './modules/permissions/permissions.module';
 import { UsersModule } from './modules/users/users.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { APP_GUARD } from '@nestjs/core';
+import { JwtAuthGuard } from './modules/auth/guard/jwt-auth.guard';
+import { BanGuard } from './modules/auth/guard/ban.guard';
+import { PermissionsGuard } from './modules/permissions/guards/permissions.guard';
 @Module({
   imports: [
     // CONFIGURATION (Strict Validation)
@@ -89,7 +93,11 @@ import { AuthModule } from './modules/auth/auth.module';
 
         // Captcha
         CAPTCHA_ENABLED: Joi.boolean().default(false),
-        CAPTCHA_SECRET: Joi.string().required(),
+        CAPTCHA_SECRET: Joi.string().when('CAPTCHA_ENABLED', {
+          is: true,
+          then: Joi.required(),
+          otherwise: Joi.optional().allow(''),
+        }),
       }),
     }),
 
@@ -230,6 +238,30 @@ import { AuthModule } from './modules/auth/auth.module';
     AuthModule,
     RolesModule,
   ],
-  providers: [JwtAccessStrategy, JwtRefreshStrategy],
+  providers: [
+    JwtAccessStrategy,
+    JwtRefreshStrategy,
+
+    // 1. RATE LIMITING: Blocks DDoS & brute-force requests first
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+    // 2. AUTHENTICATION: Verifies JWT and attaches req.user (Deny by default)
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
+    // 3. BAN ENFORCEMENT: Instantly kicks banned users via Redis (< 0.2ms)
+    {
+      provide: APP_GUARD,
+      useClass: BanGuard,
+    },
+    // 4. AUTHORIZATION: Verifies roles and permissions (@RequirePermissions)
+    {
+      provide: APP_GUARD,
+      useClass: PermissionsGuard,
+    },
+  ],
 })
 export class AppModule {}
