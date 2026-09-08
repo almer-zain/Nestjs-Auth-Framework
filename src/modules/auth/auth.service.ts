@@ -85,6 +85,9 @@ export class AuthService {
    * @throws UnauthorizedException - If credentials are invalid or account is suspended
    * @throws HttpException - If account is temporarily locked out (HTTP 429)
    */
+
+  private static readonly DUMMY_ARGON2_HASH =
+    '$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHRzb21lc2FsdA$R7BYsDeUsm0K0K1bF2U7nF3qZgZ5uU6lX8W+9vK+m5E';
   async login(data: LoginDto): Promise<LoginResult> {
     await this.lockoutService.checkLockoutThreshold(data.email);
     await this.captchaService.verify(data.captchaToken, data.ip);
@@ -102,10 +105,13 @@ export class AuthService {
       relations: ['roles', 'roles.permissions'],
     });
 
-    if (
-      !account ||
-      !(await AuthCryptoUtil.verifyPassword(account.password, data.password))
-    ) {
+    const passwordHash = account?.password ?? AuthService.DUMMY_ARGON2_HASH;
+    const isPasswordValid = await AuthCryptoUtil.verifyPassword(
+      passwordHash,
+      data.password,
+    );
+
+    if (!account || !isPasswordValid) {
       await this.lockoutService.registerFailedAttempt(data.email);
       this.logger.warn(
         `Authentication Failed: Invalid attempt for ${data.email}`,
