@@ -32,3 +32,7 @@ export interface EnableTwoFactorResult {
   readonly message: string;
   readonly recoveryCodes: string[];
 }
+
+export interface VerificationResult {
+  readonly message: string;
+}

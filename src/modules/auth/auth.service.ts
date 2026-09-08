@@ -25,6 +25,7 @@ import {
   GeneratedTwoFactorSecret,
   EnableTwoFactorResult,
 } from './types/auth.types';
+import { EmailVerifyService } from './services/email-verify.service';
 
 /**
  * Core Authentication Orchestrator.
@@ -46,6 +47,7 @@ export class AuthService {
     private readonly tokenSessionService: TokenSessionService,
     private readonly twoFactorService: TwoFactorService,
     private readonly passwordResetService: PasswordResetService,
+    private readonly emailVerifyService: EmailVerifyService,
   ) {}
 
   // ===========================================================================
@@ -68,9 +70,13 @@ export class AuthService {
       password: hashedPassword,
     });
 
-    return await this.userRepository.save(account);
-  }
+    const savedAccount = await this.userRepository.save(account);
 
+    // Automatically dispatch email verification link on signup
+    await this.emailVerifyService.sendVerificationEmail(savedAccount);
+
+    return savedAccount;
+  }
   /**
    * Authenticates user credentials, enforces suspension checks, and evaluates MFA state.
    *
@@ -179,6 +185,32 @@ export class AuthService {
       ip,
       userAgent,
     );
+  }
+
+  // ===========================================================================
+  // EMAIL VERIFICATION DELEGATIONS
+  // ===========================================================================
+
+  /**
+   * Consumes a single-use verification token and activates the user account.
+   *
+   * @param token - Raw verification token string
+   * @returns Confirmation result payload
+   */
+  async verifyEmail(token: string): Promise<{ readonly message: string }> {
+    return await this.emailVerifyService.verifyEmail(token);
+  }
+
+  /**
+   * Resends a fresh email verification link if the account is unverified.
+   *
+   * @param email - Target account email address
+   * @returns Confirmation result payload
+   */
+  async resendVerificationEmail(
+    email: string,
+  ): Promise<{ readonly message: string }> {
+    return await this.emailVerifyService.resendVerificationEmail(email);
   }
 
   // ===========================================================================

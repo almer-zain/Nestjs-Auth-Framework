@@ -9,6 +9,9 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  Param,
+  Delete,
+  Get,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -39,6 +42,8 @@ import {
   GeneratedTwoFactorSecret,
   EnableTwoFactorResult,
 } from './types/auth.types';
+import { ResendVerificationDto, VerifyEmailDto } from './dto/verify-email.dto';
+import { UserSession } from './entities/user-session.entity';
 
 /**
  * Authentication & Identity Controller.
@@ -51,6 +56,10 @@ import {
 @UseInterceptors(ClassSerializerInterceptor)
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  // ===========================================================================
+  // CORE AUTH ENDPOINTS
+  // ===========================================================================
 
   /**
    * Registers a new account with Argon2id password hashing and optional CAPTCHA verification.
@@ -127,166 +136,6 @@ export class AuthController {
       ip,
       userAgent: ua || 'Unknown Device',
     });
-  }
-
-  /**
-   * Rotates access and refresh tokens for a specific device session with reuse detection.
-   *
-   * @param data - Payload containing the active refresh token
-   * @param ip - Client IP address
-   * @param ua - Client User-Agent string
-   * @returns Rotated Access and Refresh token pair
-   */
-  @Post('refresh')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Rotate session tokens',
-    description:
-      'Exchanges a valid refresh token for a newly rotated Access & Refresh token pair. Implements automatic token theft detection.',
-  })
-  @ApiResponse({
-    status: HttpStatus.OK,
-    description: 'Tokens successfully rotated.',
-    schema: {
-      properties: {
-        accessToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
-        refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
-      },
-    },
-  })
-  @ApiUnauthorizedResponse({
-    description: 'Expired, revoked, or compromised refresh token.',
-  })
-  async refreshToken(
-    @Body() data: RefreshTokenDto,
-    @Ip() ip: string,
-    @Headers('user-agent') ua: string,
-  ): Promise<AuthTokens> {
-    return await this.authService.refreshTokens(data.refreshToken, ip, ua);
-  }
-
-  /**
-   * Initializes TOTP-based 2FA setup by generating a secret and QR code URI.
-   *
-   * @param userId - Target user identifier extracted from JWT payload
-   * @returns Generated Base32 secret, QR code image, and otpauth URI
-   */
-  @Post('2fa/generate')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Initialize 2FA setup (QR Code)',
-    description:
-      'Generates a TOTP Base32 secret and returns a QR code data URI. Does NOT activate 2FA until confirmed via `/auth/2fa/enable`.',
-  })
-  @ApiResponse({
-    status: HttpStatus.OK,
-    description: '2FA secret and QR code successfully generated.',
-    schema: {
-      properties: {
-        secret: { type: 'string', example: 'JBSWY3DPEHPK3PXP' },
-        qrCode: {
-          type: 'string',
-          example: 'data:image/png;base64,iVBORw0KGgo...',
-        },
-        uri: {
-          type: 'string',
-          example: 'otpauth://totp/MyApp:user@example.com?secret=...',
-        },
-      },
-    },
-  })
-  @ApiUnauthorizedResponse({
-    description: 'Missing or invalid Bearer access token.',
-  })
-  async generate2FA(
-    @CurrentUser('sub') userId: number,
-  ): Promise<GeneratedTwoFactorSecret> {
-    return await this.authService.generate2FASecret(userId);
-  }
-
-  /**
-   * Confirms initial TOTP code, enables 2FA, and generates single-use backup recovery codes.
-   *
-   * @param userId - Target user identifier extracted from JWT payload
-   * @param data - Payload containing the 6-digit confirmation code
-   * @returns Confirmation message and list of unhashed recovery codes
-   */
-  @Post('2fa/enable')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Confirm and activate 2FA',
-    description:
-      'Verifies the first 6-digit TOTP code against the generated secret to permanently enable 2FA on the account.',
-  })
-  @ApiResponse({
-    status: HttpStatus.OK,
-    description: 'Two-factor authentication successfully activated.',
-    schema: {
-      properties: {
-        message: {
-          type: 'string',
-          example: 'Two-factor authentication enabled successfully',
-        },
-        recoveryCodes: {
-          type: 'array',
-          items: { type: 'string' },
-          example: ['A1B2-C3D4', 'E5F6-G7H8'],
-        },
-      },
-    },
-  })
-  @ApiBadRequestResponse({
-    description: 'Invalid verification code or setup uninitialized.',
-  })
-  @ApiUnauthorizedResponse({
-    description: 'Missing or invalid Bearer access token.',
-  })
-  async enable2FA(
-    @CurrentUser('sub') userId: number,
-    @Body() data: Enable2FADto,
-  ): Promise<EnableTwoFactorResult> {
-    return await this.authService.enable2FA(userId, data);
-  }
-
-  /**
-   * Validates an MFA challenge ticket alongside a 6-digit TOTP code or recovery code.
-   *
-   * @param data - MFA challenge payload containing ticket and token
-   * @param ip - Client IP address
-   * @param ua - Client User-Agent string
-   * @returns Full Access & Refresh session token pair
-   */
-  @Post('2fa/verify')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Verify 2FA login challenge',
-    description:
-      'Exchanges the short-lived `mfaTicket` and a 6-digit TOTP code for full Access & Refresh session tokens.',
-  })
-  @ApiResponse({
-    status: HttpStatus.OK,
-    description: 'MFA challenge verified. Tokens issued.',
-    schema: {
-      properties: {
-        accessToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
-        refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
-      },
-    },
-  })
-  @ApiUnauthorizedResponse({
-    description: 'Invalid or expired MFA ticket, or incorrect OTP code.',
-  })
-  @ApiNotFoundResponse({ description: 'User account not found.' })
-  async verify2FA(
-    @Body() data: Verify2FADto,
-    @Ip() ip: string,
-    @Headers('user-agent') ua: string,
-  ): Promise<AuthTokens> {
-    return await this.authService.verify2FA(data, ip, ua);
   }
 
   /**
@@ -411,5 +260,311 @@ export class AuthController {
     @CurrentUser('sub') userId: number,
   ): Promise<{ message: string }> {
     return await this.authService.logoutAllSessions(userId);
+  }
+
+  // ===========================================================================
+  // EMAIL VERIFICATION ENDPOINTS
+  // ===========================================================================
+
+  /**
+   * Confirms and activates a user's email address using a single-use verification token.
+   *
+   * @param data - Payload containing the plaintext token sent via email
+   * @returns Verification confirmation message
+   */
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify account email address',
+    description:
+      'Consumes a single-use verification token, marks `isEmailVerified` as true, and clears token expiration.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Email successfully verified.',
+    schema: {
+      properties: {
+        message: {
+          type: 'string',
+          example:
+            'Email verified successfully. You can now use all platform features.',
+        },
+      },
+    },
+  })
+  @ApiBadRequestResponse({
+    description: 'Verification token is invalid, expired, or already consumed.',
+  })
+  async verifyEmail(
+    @Body() data: VerifyEmailDto,
+  ): Promise<{ readonly message: string }> {
+    return await this.authService.verifyEmail(data.token);
+  }
+
+  /**
+   * Resends an email verification link to an unverified user account.
+   *
+   * @param data - Payload containing the target account email
+   * @returns Generic confirmation message to prevent account enumeration
+   */
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Resend email verification link',
+    description:
+      'Dispatches a fresh 24-hour verification link if the account exists and remains unverified. Always returns 200 OK.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Verification email dispatched if the account is eligible.',
+    schema: {
+      properties: {
+        message: {
+          type: 'string',
+          example:
+            'If the account exists and is unverified, a verification link has been dispatched.',
+        },
+      },
+    },
+  })
+  async resendVerification(
+    @Body() data: ResendVerificationDto,
+  ): Promise<{ readonly message: string }> {
+    return await this.authService.resendVerificationEmail(data.email);
+  }
+
+  // ===========================================================================
+  // ACTIVE DEVICE & SESSION MANAGEMENT ENDPOINTS
+  // ===========================================================================
+
+  /**
+   * Lists all active device sessions for the authenticated user.
+   *
+   * @param userId - Target user identifier resolved from JWT payload
+   * @returns Array of active device session metadata (IP, User-Agent, last active)
+   */
+  @Get('sessions')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'List active device sessions',
+    description:
+      'Retrieves all non-revoked session records across all devices (Desktop, Mobile, Web) for the current user.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Active sessions retrieved successfully.',
+    type: [UserSession],
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid Bearer access token.',
+  })
+  async getSessions(
+    @CurrentUser('sub') userId: number,
+  ): Promise<UserSession[]> {
+    return await this.authService.listUserSessions(userId);
+  }
+
+  /**
+   * Remotely revokes a specific device session for the authenticated user.
+   *
+   * @param userId - Target user identifier resolved from JWT payload
+   * @param sessionId - Unique UUID of the device session to terminate
+   * @returns Revocation confirmation message
+   */
+  @Delete('sessions/:id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Remotely revoke a device session',
+    description:
+      'Marks a specific session UUID as revoked, instantly terminating access on that device upon its next refresh cycle.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Session successfully revoked.',
+    schema: {
+      properties: {
+        message: { type: 'string', example: 'Session successfully revoked' },
+      },
+    },
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid Bearer access token.',
+  })
+  @ApiNotFoundResponse({
+    description: 'Session not found or does not belong to the current user.',
+  })
+  async revokeSession(
+    @CurrentUser('sub') userId: number,
+    @Param('id') sessionId: string,
+  ): Promise<{ readonly message: string }> {
+    return await this.authService.revokeSession(userId, sessionId);
+  }
+
+  /**
+   * Rotates access and refresh tokens for a specific device session with reuse detection.
+   *
+   * @param data - Payload containing the active refresh token
+   * @param ip - Client IP address
+   * @param ua - Client User-Agent string
+   * @returns Rotated Access and Refresh token pair
+   */
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Rotate session tokens',
+    description:
+      'Exchanges a valid refresh token for a newly rotated Access & Refresh token pair. Implements automatic token theft detection.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Tokens successfully rotated.',
+    schema: {
+      properties: {
+        accessToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+        refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+      },
+    },
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Expired, revoked, or compromised refresh token.',
+  })
+  async refreshToken(
+    @Body() data: RefreshTokenDto,
+    @Ip() ip: string,
+    @Headers('user-agent') ua: string,
+  ): Promise<AuthTokens> {
+    return await this.authService.refreshTokens(data.refreshToken, ip, ua);
+  }
+
+  // ===========================================================================
+  // TWO-FACTOR AUTHENTICATIONS ENDPOINTS
+  // ===========================================================================
+
+  /**
+   * Initializes TOTP-based 2FA setup by generating a secret and QR code URI.
+   *
+   * @param userId - Target user identifier extracted from JWT payload
+   * @returns Generated Base32 secret, QR code image, and otpauth URI
+   */
+  @Post('2fa/generate')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Initialize 2FA setup (QR Code)',
+    description:
+      'Generates a TOTP Base32 secret and returns a QR code data URI. Does NOT activate 2FA until confirmed via `/auth/2fa/enable`.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: '2FA secret and QR code successfully generated.',
+    schema: {
+      properties: {
+        secret: { type: 'string', example: 'JBSWY3DPEHPK3PXP' },
+        qrCode: {
+          type: 'string',
+          example: 'data:image/png;base64,iVBORw0KGgo...',
+        },
+        uri: {
+          type: 'string',
+          example: 'otpauth://totp/MyApp:user@example.com?secret=...',
+        },
+      },
+    },
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid Bearer access token.',
+  })
+  async generate2FA(
+    @CurrentUser('sub') userId: number,
+  ): Promise<GeneratedTwoFactorSecret> {
+    return await this.authService.generate2FASecret(userId);
+  }
+
+  /**
+   * Confirms initial TOTP code, enables 2FA, and generates single-use backup recovery codes.
+   *
+   * @param userId - Target user identifier extracted from JWT payload
+   * @param data - Payload containing the 6-digit confirmation code
+   * @returns Confirmation message and list of unhashed recovery codes
+   */
+  @Post('2fa/enable')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Confirm and activate 2FA',
+    description:
+      'Verifies the first 6-digit TOTP code against the generated secret to permanently enable 2FA on the account.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Two-factor authentication successfully activated.',
+    schema: {
+      properties: {
+        message: {
+          type: 'string',
+          example: 'Two-factor authentication enabled successfully',
+        },
+        recoveryCodes: {
+          type: 'array',
+          items: { type: 'string' },
+          example: ['A1B2-C3D4', 'E5F6-G7H8'],
+        },
+      },
+    },
+  })
+  @ApiBadRequestResponse({
+    description: 'Invalid verification code or setup uninitialized.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid Bearer access token.',
+  })
+  async enable2FA(
+    @CurrentUser('sub') userId: number,
+    @Body() data: Enable2FADto,
+  ): Promise<EnableTwoFactorResult> {
+    return await this.authService.enable2FA(userId, data);
+  }
+
+  /**
+   * Validates an MFA challenge ticket alongside a 6-digit TOTP code or recovery code.
+   *
+   * @param data - MFA challenge payload containing ticket and token
+   * @param ip - Client IP address
+   * @param ua - Client User-Agent string
+   * @returns Full Access & Refresh session token pair
+   */
+  @Post('2fa/verify')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify 2FA login challenge',
+    description:
+      'Exchanges the short-lived `mfaTicket` and a 6-digit TOTP code for full Access & Refresh session tokens.',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'MFA challenge verified. Tokens issued.',
+    schema: {
+      properties: {
+        accessToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+        refreshToken: { type: 'string', example: 'eyJhbGciOiJIUzI1Ni...' },
+      },
+    },
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Invalid or expired MFA ticket, or incorrect OTP code.',
+  })
+  @ApiNotFoundResponse({ description: 'User account not found.' })
+  async verify2FA(
+    @Body() data: Verify2FADto,
+    @Ip() ip: string,
+    @Headers('user-agent') ua: string,
+  ): Promise<AuthTokens> {
+    return await this.authService.verify2FA(data, ip, ua);
   }
 }

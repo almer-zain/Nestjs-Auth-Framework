@@ -14,6 +14,7 @@ import { TwoFactorService } from './services/two-factor.service';
 import { TokenSessionService } from './services/token-session.service';
 import { PasswordResetService } from './services/password-reset.service';
 import { AuthLockoutService } from './services/auth-lockout.service';
+import { EmailVerifyService } from './services/email-verify.service';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { AuthLockoutService } from './services/auth-lockout.service';
     TokenSessionService,
     PasswordResetService,
     AuthLockoutService,
+    EmailVerifyService,
   ],
 })
 export class AuthModule {}
